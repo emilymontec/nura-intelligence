@@ -3,6 +3,7 @@ from django.urls import include, path
 from django.http import JsonResponse
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView, SpectacularRedocView
 from .status_view import api_status
+from .health import healthz
 
 
 def api_404(request, exception=None):
@@ -16,6 +17,9 @@ handler404 = api_404
 
 urlpatterns = [
     path('', api_status, name='api_status'),
+    # Módulo 0 — healthcheck real (JSON, verifica DB + cache) para Docker
+    # healthcheck / balanceador de carga / monitoring externo.
+    path('healthz/', healthz, name='healthz'),
     path('admin/', admin.site.urls),
     # Módulo 6 — API pública documentada (antes: drf-spectacular instalado
     # pero sin ningún endpoint de schema/Swagger activado en todo el proyecto).

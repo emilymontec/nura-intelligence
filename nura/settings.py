@@ -291,3 +291,120 @@ CELERY_ACCEPT_CONTENT = ['json']
 CELERY_TASK_SERIALIZER = 'json'
 CELERY_RESULT_SERIALIZER = 'json'
 CELERY_TIMEZONE = TIME_ZONE if 'TIME_ZONE' in dir() else 'UTC'
+
+
+# --- Módulo 0: Logging estructurado ---
+# Antes de esto no había ningún LOGGING configurado: Django usaba su
+# configuración por defecto, que en producción (DEBUG=False) directamente
+# no imprime nada a consola salvo errores 500 — en un contenedor eso
+# significa que `docker logs` queda prácticamente vacío. Este bloque:
+#   - define un formato con timestamp + módulo + nivel, legible en
+#     `docker logs` o en el drain de un proveedor (Cloudwatch, Render, etc.)
+#   - loguea siempre a consola (stdout), que es lo que cualquier
+#     orquestador de contenedores captura sin configuración extra
+#   - el logger raíz de la app ('chat', 'nura') va a INFO en producción y
+#     DEBUG en desarrollo, para no inundar la consola local con SQL queries
+#   - respeta DJANGO_LOG_LEVEL si se quiere overridear sin tocar código
+LOG_LEVEL = os.getenv('DJANGO_LOG_LEVEL', 'DEBUG' if DEBUG else 'INFO')
+
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'formatters': {
+        'verbose': {
+            'format': '%(asctime)s [%(levelname)s] %(name)s: %(message)s',
+            'datefmt': '%Y-%m-%d %H:%M:%S',
+        },
+    },
+    'handlers': {
+        'console': {
+            'class': 'logging.StreamHandler',
+            'formatter': 'verbose',
+        },
+    },
+    'root': {
+        'handlers': ['console'],
+        'level': 'WARNING',
+    },
+    'loggers': {
+        'django': {
+            'handlers': ['console'],
+            'level': os.getenv('DJANGO_FRAMEWORK_LOG_LEVEL', 'WARNING'),
+            'propagate': False,
+        },
+        'django.request': {
+            # Los 500 de Django ya traen traceback completo por acá.
+            'handlers': ['console'],
+            'level': 'ERROR',
+            'propagate': False,
+        },
+        # Loggers propios de la app: todo lo que viva bajo services/ usa
+        # logging.getLogger(__name__), que con la estructura de paquetes
+        # actual (services/chat/..., services/ai/..., services/analytics/...)
+        # cae bajo estos tres nombres.
+        'chat': {
+            'handlers': ['console'],
+            'level': LOG_LEVEL,
+            'propagate': False,
+        },
+        'ai': {
+            'handlers': ['console'],
+            'level': LOG_LEVEL,
+            'propagate': False,
+        },
+        'analytics': {
+            'handlers': ['console'],
+            'level': LOG_LEVEL,
+            'propagate': False,
+        },
+        'celery': {
+            'handlers': ['console'],
+            # Celery es ruidoso incluso en DEBUG: su propio framework interno
+            # (chord/chain/group, introspección de tareas) loguea a nivel
+            # DEBUG cosas que no son del dominio de la app. Se fija a INFO
+            # por defecto SIEMPRE (en dev y en producción), separado de
+            # LOG_LEVEL, para no inundar la consola local con ruido interno
+            # de Celery — las tareas propias (analyze_dataset_task, etc.) ya
+            # loguean con logging.getLogger("chat"), así que esto no pierde
+            # visibilidad real. Overrideable con DJANGO_CELERY_LOG_LEVEL si
+            # alguna vez hace falta depurar Celery mismo.
+            'level': os.getenv('DJANGO_CELERY_LOG_LEVEL', 'INFO'),
+            'propagate': False,
+        },
+    },
+}
+
+# --- Módulo 0: Monitoring (Sentry opcional) ---
+# Mismo patrón de fallback que Redis/Celery/Caché en todo este proyecto:
+# si no hay SENTRY_DSN configurado, simplemente no se inicializa — el
+# proyecto sigue funcionando igual en local sin pedir una cuenta de
+# Sentry. Si se configura SENTRY_DSN (en producción, normalmente), cada
+# excepción no capturada y cada log de nivel ERROR se reporta automática.
+# `sentry-sdk` se importa de forma perezosa y tolerante: si el paquete no
+# está instalado (p. ej. un entorno viejo que no corrió pip install de
+# nuevo) no se rompe el arranque del proyecto, solo se omite el reporte.
+SENTRY_DSN = os.getenv('SENTRY_DSN', '')
+if SENTRY_DSN:
+    try:
+        import sentry_sdk
+        from sentry_sdk.integrations.django import DjangoIntegration
+        from sentry_sdk.integrations.celery import CeleryIntegration
+        from sentry_sdk.integrations.logging import LoggingIntegration
+
+        sentry_sdk.init(
+            dsn=SENTRY_DSN,
+            integrations=[
+                DjangoIntegration(),
+                CeleryIntegration(),
+                LoggingIntegration(level=None, event_level='ERROR'),
+            ],
+            traces_sample_rate=float(os.getenv('SENTRY_TRACES_SAMPLE_RATE', '0.0')),
+            environment=os.getenv('SENTRY_ENVIRONMENT', 'development' if DEBUG else 'production'),
+            send_default_pii=False,
+        )
+    except ImportError:
+        import logging as _logging
+        _logging.getLogger(__name__).warning(
+            "SENTRY_DSN está configurado pero 'sentry-sdk' no está instalado "
+            "(pip install -r requirements.txt) — el reporte a Sentry queda desactivado."
+        )

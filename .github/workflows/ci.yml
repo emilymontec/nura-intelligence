@@ -1,0 +1,120 @@
+name: CI
+
+# Antes de este archivo no existía NINGÚN pipeline de CI en el proyecto:
+# un commit podía romper el backend o el build del frontend sin que nadie
+# se enterara hasta correrlo en local. Este workflow corre en cada push y
+# cada pull request contra main, y tiene dos jobs independientes (backend
+# y frontend) para que un fallo en uno no oculte el resultado del otro.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+
+jobs:
+  backend:
+    name: Backend (Django) — tests sobre Postgres + Redis reales
+    runs-on: ubuntu-latest
+
+    # Se corre contra Postgres y Redis reales (no SQLite/modo-eager) para
+    # que el pipeline también verifique la ruta de producción, no solo el
+    # fallback de desarrollo local.
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: nura_chat
+          POSTGRES_PASSWORD: nura_chat_password
+          POSTGRES_DB: nura_chat_db
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U nura_chat -d nura_chat_db"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DJANGO_SECRET_KEY: ci-only-secret-key-not-for-production
+      DJANGO_DEBUG: "False"
+      DATABASE_URL: postgres://nura_chat:nura_chat_password@localhost:5432/nura_chat_db
+      REDIS_URL: redis://localhost:6379/0
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Instalar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: "pip"
+
+      - name: Instalar dependencias
+        # requirements.txt está en UTF-16LE (heredado del proyecto original);
+        # pip lo lee sin problema, no hace falta convertirlo.
+        run: pip install -r requirements.txt
+
+      - name: Aplicar migraciones
+        run: python manage.py migrate --noinput
+
+      - name: Chequeo de configuración Django
+        run: python manage.py check
+
+      - name: Correr suite de tests
+        run: python manage.py test chat --verbosity=2
+
+      - name: Verificar que el healthcheck responde (DB + cache reales)
+        run: |
+          python manage.py runserver 0.0.0.0:8000 &
+          SERVER_PID=$!
+          for i in $(seq 1 15); do
+            if curl -sf http://localhost:8000/healthz/ > /dev/null; then
+              echo "healthz OK"
+              break
+            fi
+            sleep 1
+          done
+          curl -sf http://localhost:8000/healthz/ | tee /tmp/healthz.json
+          kill $SERVER_PID
+          grep -q '"status": "ok"' /tmp/healthz.json
+
+  frontend:
+    name: Frontend (React + Vite) — build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Instalar pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.0
+
+      - name: Instalar Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "pnpm"
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Instalar dependencias
+        run: pnpm install --frozen-lockfile
+
+      - name: Build de producción
+        # No hay lint ni tests de frontend configurados todavía
+        # (package.json solo define dev/build/preview) — un build exitoso
+        # es hoy la única verificación automática disponible para el
+        # frontend. Si se agrega ESLint o Vitest más adelante, este job es
+        # el lugar natural para sumarlos como pasos extra.
+        run: pnpm run build
