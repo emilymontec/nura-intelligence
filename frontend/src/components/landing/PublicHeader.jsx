@@ -29,13 +29,13 @@ export default function PublicHeader() {
 
         <div className="flex items-center gap-5 text-xs">
           <Link
-            to="/auth/login"
+            to="/login"
             className="text-white/40 hover:text-white transition-colors duration-300 font-mono text-[11px]"
           >
             INICIAR SESIÓN
           </Link>
           <Link
-            to="/auth/register"
+            to="/register"
             className="px-3.5 py-1.5 rounded bg-white text-nura-black hover:bg-white/80 transition-all font-medium text-[11px] tracking-wide"
           >
             REGISTRARSE

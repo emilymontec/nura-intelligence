@@ -3,8 +3,8 @@ import { Link, useParams } from 'react-router-dom';
 import { MailCheck } from 'lucide-react';
 
 const API_BASE_URL = import.meta.env.VITE_API_URL
-  ? `${import.meta.env.VITE_API_URL}/api`
-  : '/api';
+  ? import.meta.env.VITE_API_URL
+  : '';
 
 function VerifyEmail() {
   const { key } = useParams();
@@ -72,7 +72,7 @@ function VerifyEmail() {
                 ¡Correo electrónico verificado con éxito! Ya puedes iniciar sesión.
               </div>
               <div className="pt-2 flex items-center justify-center text-xs font-mono">
-                <Link to="/auth/login" className="text-nura-electric hover:text-white transition-colors">
+                <Link to="/login" className="text-nura-electric hover:text-white transition-colors">
                   Iniciar Sesión
                 </Link>
               </div>
@@ -85,7 +85,7 @@ function VerifyEmail() {
                 {error}
               </div>
               <div className="pt-2 flex items-center justify-center text-xs font-mono">
-                <Link to="/auth/login" className="text-white/40 hover:text-white transition-colors">
+                <Link to="/login" className="text-white/40 hover:text-white transition-colors">
                   Volver a Iniciar Sesión
                 </Link>
               </div>

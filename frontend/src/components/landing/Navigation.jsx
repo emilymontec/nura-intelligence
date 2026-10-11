@@ -18,12 +18,12 @@ function Navigation() {
           <>
             <span className="user-email">{user.email}</span>
             <button onClick={logout}>Cerrar Sesión</button>
-            <Link to="/chat" className="cta">Ir al Chat</Link>
+            <Link to="/asistente" className="cta">Ir al Chat</Link>
           </>
         ) : (
           <>
-            <Link to="/auth/login">Iniciar Sesión</Link>
-            <Link to="/auth/register" className="cta">Crear Cuenta</Link>
+            <Link to="/login">Iniciar Sesión</Link>
+            <Link to="/register" className="cta">Crear Cuenta</Link>
           </>
         )}
       </div>

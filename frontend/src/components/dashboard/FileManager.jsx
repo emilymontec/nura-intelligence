@@ -32,6 +32,51 @@ import {
 
 const API_BASE = import.meta.env.VITE_API_URL || "";
 
+// Módulo 2 — subida en partes para archivos grandes. Por debajo del umbral
+// se sube en un solo POST (como antes); por encima, el archivo se parte en
+// pedazos de 5MB y se van mandando uno por uno al endpoint de chunks.
+const CHUNK_SIZE = 5 * 1024 * 1024; // 5MB
+const CHUNK_THRESHOLD = 10 * 1024 * 1024; // 10MB
+
+function makeUploadId() {
+  return `u${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
+}
+
+async function uploadFileInChunks(file, headers, onProgress) {
+  const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+  const uploadId = makeUploadId();
+  let lastData = null;
+
+  for (let index = 0; index < totalChunks; index++) {
+    const start = index * CHUNK_SIZE;
+    const end = Math.min(start + CHUNK_SIZE, file.size);
+    const blob = file.slice(start, end);
+
+    const formData = new FormData();
+    formData.append("upload_id", uploadId);
+    formData.append("file_name", file.name);
+    formData.append("chunk_index", String(index));
+    formData.append("total_chunks", String(totalChunks));
+    formData.append("chunk", blob, file.name);
+
+    const res = await fetch(`${API_BASE}/datasets/upload-chunk`, {
+      method: "POST",
+      headers,
+      body: formData,
+    });
+
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.error || body.detail || `Error ${res.status} subiendo pedazo ${index + 1}/${totalChunks}`);
+    }
+
+    lastData = await res.json();
+    if (onProgress) onProgress(Math.round(((index + 1) / totalChunks) * 100));
+  }
+
+  return lastData;
+}
+
 const FILE_ICONS = {
   csv: FileSpreadsheet,
   xlsx: FileSpreadsheet,
@@ -206,6 +251,7 @@ export default function FileManager() {
   const [stats, setStats] = useState(null);
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState({});
 
   const [search, setSearch] = useState("");
   const [filterType, setFilterType] = useState("");
@@ -245,9 +291,9 @@ export default function FileManager() {
       params.set("sort", sortBy);
 
       const [dsRes, catRes, statsRes] = await Promise.all([
-        fetch(`${API_BASE}/api/datasets?${params}`, { headers }),
-        fetch(`${API_BASE}/api/categories`, { headers }),
-        fetch(`${API_BASE}/api/datasets/stats`, { headers }),
+        fetch(`${API_BASE}/datasets?${params}`, { headers }),
+        fetch(`${API_BASE}/categories`, { headers }),
+        fetch(`${API_BASE}/datasets/stats`, { headers }),
       ]);
 
       if (dsRes.ok) setDatasets(await dsRes.json());
@@ -266,21 +312,30 @@ export default function FileManager() {
     if (!files?.length) return;
     setUploading(true);
     setUploadError(null);
+    setUploadProgress({});
     const errors = [];
     try {
       const headers = await getHeaders();
       for (const file of files) {
-        const formData = new FormData();
-        formData.append("file", file);
         try {
-          const res = await fetch(`${API_BASE}/api/datasets`, { method: "POST", headers, body: formData });
-          if (!res.ok) {
-            const body = await res.json().catch(() => ({}));
-            const msg = body.error || body.detail || `Error ${res.status}`;
-            errors.push(`${file.name}: ${msg}`);
+          if (file.size > CHUNK_THRESHOLD) {
+            // Archivo grande: subida en partes, con progreso por archivo.
+            setUploadProgress((prev) => ({ ...prev, [file.name]: 0 }));
+            await uploadFileInChunks(file, headers, (pct) => {
+              setUploadProgress((prev) => ({ ...prev, [file.name]: pct }));
+            });
+          } else {
+            const formData = new FormData();
+            formData.append("file", file);
+            const res = await fetch(`${API_BASE}/datasets`, { method: "POST", headers, body: formData });
+            if (!res.ok) {
+              const body = await res.json().catch(() => ({}));
+              const msg = body.error || body.detail || `Error ${res.status}`;
+              errors.push(`${file.name}: ${msg}`);
+            }
           }
         } catch (err) {
-          errors.push(`${file.name}: Error de red`);
+          errors.push(`${file.name}: ${err.message || "Error de red"}`);
         }
       }
       if (errors.length > 0) {
@@ -292,6 +347,7 @@ export default function FileManager() {
       setUploadError("Error inesperado al subir archivos");
     } finally {
       setUploading(false);
+      setUploadProgress({});
     }
   };
 
@@ -304,7 +360,7 @@ export default function FileManager() {
   const handleDelete = async (id) => {
     try {
       const headers = await getHeaders();
-      await fetch(`${API_BASE}/api/datasets/${id}`, { method: "DELETE", headers });
+      await fetch(`${API_BASE}/datasets/${id}`, { method: "DELETE", headers });
       fetchData();
     } catch (e) {
       console.error("Delete error:", e);
@@ -317,7 +373,7 @@ export default function FileManager() {
     try {
       const headers = await getHeaders();
       headers["Content-Type"] = "application/json";
-      await fetch(`${API_BASE}/api/datasets/bulk-delete`, {
+      await fetch(`${API_BASE}/datasets/bulk-delete`, {
         method: "POST",
         headers,
         body: JSON.stringify({ ids: [...selectedIds] }),
@@ -334,7 +390,7 @@ export default function FileManager() {
     try {
       const headers = await getHeaders();
       headers["Content-Type"] = "application/json";
-      await fetch(`${API_BASE}/api/datasets/${id}/rename`, {
+      await fetch(`${API_BASE}/datasets/${id}/rename`, {
         method: "POST",
         headers,
         body: JSON.stringify({ file_name: editName.trim() }),
@@ -349,7 +405,7 @@ export default function FileManager() {
   const handleStar = async (id) => {
     try {
       const headers = await getHeaders();
-      await fetch(`${API_BASE}/api/datasets/${id}/star`, { method: "POST", headers });
+      await fetch(`${API_BASE}/datasets/${id}/star`, { method: "POST", headers });
       fetchData();
     } catch (e) {
       console.error("Star error:", e);
@@ -360,7 +416,7 @@ export default function FileManager() {
     try {
       const headers = await getHeaders();
       headers["Content-Type"] = "application/json";
-      await fetch(`${API_BASE}/api/datasets/${id}/move`, {
+      await fetch(`${API_BASE}/datasets/${id}/move`, {
         method: "POST",
         headers,
         body: JSON.stringify({ category_id: categoryId || null }),
@@ -375,7 +431,7 @@ export default function FileManager() {
     try {
       const headers = await getHeaders();
       headers["Content-Type"] = "application/json";
-      await fetch(`${API_BASE}/api/categories`, {
+      await fetch(`${API_BASE}/categories`, {
         method: "POST",
         headers,
         body: JSON.stringify({ name, color }),
@@ -389,7 +445,7 @@ export default function FileManager() {
   const handleDeleteCategory = async (id) => {
     try {
       const headers = await getHeaders();
-      await fetch(`${API_BASE}/api/categories/${id}`, { method: "DELETE", headers });
+      await fetch(`${API_BASE}/categories/${id}`, { method: "DELETE", headers });
       fetchData();
     } catch (e) {
       console.error("Delete category error:", e);
@@ -400,7 +456,7 @@ export default function FileManager() {
     try {
       const headers = await getHeaders();
       headers["Content-Type"] = "application/json";
-      await fetch(`${API_BASE}/api/datasets/${id}/duplicate`, { method: "POST", headers, body: JSON.stringify({}) });
+      await fetch(`${API_BASE}/datasets/${id}/duplicate`, { method: "POST", headers, body: JSON.stringify({}) });
       fetchData();
     } catch (e) {
       console.error("Duplicate error:", e);
@@ -410,7 +466,7 @@ export default function FileManager() {
   const handleArchive = async (id) => {
     try {
       const headers = await getHeaders();
-      await fetch(`${API_BASE}/api/datasets/${id}/archive`, { method: "POST", headers });
+      await fetch(`${API_BASE}/datasets/${id}/archive`, { method: "POST", headers });
       fetchData();
     } catch (e) {
       console.error("Archive error:", e);
@@ -420,7 +476,7 @@ export default function FileManager() {
   const handleReanalyze = async (id) => {
     try {
       const headers = await getHeaders();
-      await fetch(`${API_BASE}/api/datasets/${id}/reanalyze`, { method: "POST", headers });
+      await fetch(`${API_BASE}/datasets/${id}/reanalyze`, { method: "POST", headers });
       fetchData();
     } catch (e) {
       console.error("Reanalyze error:", e);
@@ -432,7 +488,7 @@ export default function FileManager() {
       const headers = await getHeaders();
       headers["Content-Type"] = "application/json";
       const note = window.prompt("Nota para esta versión (opcional):") || "";
-      await fetch(`${API_BASE}/api/datasets/${id}/versions`, {
+      await fetch(`${API_BASE}/datasets/${id}/versions`, {
         method: "POST", headers, body: JSON.stringify({ note }),
       });
       fetchData();
@@ -444,7 +500,7 @@ export default function FileManager() {
   const handleRestoreVersion = async (datasetId, versionId) => {
     try {
       const headers = await getHeaders();
-      await fetch(`${API_BASE}/api/datasets/${datasetId}/versions/${versionId}/restore`, { method: "POST", headers });
+      await fetch(`${API_BASE}/datasets/${datasetId}/versions/${versionId}/restore`, { method: "POST", headers });
       setShowVersions(null);
       fetchData();
     } catch (e) {
@@ -457,7 +513,7 @@ export default function FileManager() {
     try {
       const headers = await getHeaders();
       headers["Content-Type"] = "application/json";
-      await fetch(`${API_BASE}/api/datasets/${id}/tags/add`, {
+      await fetch(`${API_BASE}/datasets/${id}/tags/add`, {
         method: "POST", headers, body: JSON.stringify({ tags: [tagName.trim()] }),
       });
       fetchData();
@@ -470,7 +526,7 @@ export default function FileManager() {
     try {
       const headers = await getHeaders();
       headers["Content-Type"] = "application/json";
-      await fetch(`${API_BASE}/api/datasets/${id}/tags/remove`, {
+      await fetch(`${API_BASE}/datasets/${id}/tags/remove`, {
         method: "POST", headers, body: JSON.stringify({ tags: [tagName] }),
       });
       fetchData();
@@ -666,6 +722,24 @@ export default function FileManager() {
           <p className="text-white/20 text-[10px]">CSV, XLSX, JSON — máx. 50MB por archivo</p>
         </div>
       </div>
+      {Object.keys(uploadProgress).length > 0 && (
+        <div className="mb-3 space-y-1.5">
+          {Object.entries(uploadProgress).map(([name, pct]) => (
+            <div key={name} className="text-[11px]">
+              <div className="flex justify-between text-white/40 mb-0.5">
+                <span className="truncate max-w-[70%]">{name}</span>
+                <span>{pct}%</span>
+              </div>
+              <div className="h-1 rounded-full bg-nura-gray/50 overflow-hidden">
+                <div
+                  className="h-full bg-nura-electric transition-all duration-150"
+                  style={{ width: `${pct}%` }}
+                />
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
       {uploadError && (
         <div className="mb-3 p-3 rounded-lg bg-red-500/10 border border-red-500/30 text-red-400 text-[11px] flex items-start gap-2">
           <AlertTriangle className="w-3.5 h-3.5 mt-0.5 flex-none" />
@@ -773,7 +847,7 @@ export default function FileManager() {
                     <button onClick={() => setShowTagManager(ds)} className={`p-1 rounded hover:bg-white/5 ${ds.tags?.length > 0 ? "text-nura-electric" : "text-white/30 hover:text-nura-electric"}`} title="Etiquetas">
                       <Tag className="w-3 h-3" />
                     </button>
-                    <a href={`${API_BASE}/api/datasets/${ds.id}/download/`} className="p-1 rounded hover:bg-white/5 text-white/30 hover:text-white/60" title="Descargar" onClick={(e) => e.stopPropagation()}>
+                    <a href={`${API_BASE}/datasets/${ds.id}/download/`} className="p-1 rounded hover:bg-white/5 text-white/30 hover:text-white/60" title="Descargar" onClick={(e) => e.stopPropagation()}>
                       <Download className="w-3 h-3" />
                     </a>
                     <div className="relative group/cat">
@@ -860,7 +934,7 @@ export default function FileManager() {
                     <button onClick={() => handleDuplicate(ds.id)} className="p-1.5 rounded hover:bg-white/5 text-white/30 hover:text-white/60" title="Duplicar"><Copy className="w-3 h-3" /></button>
                     <button onClick={() => handleArchive(ds.id)} className={`p-1.5 rounded hover:bg-white/5 ${ds.archived ? "text-orange-400" : "text-white/30 hover:text-orange-400"}`} title="Archivar"><Archive className="w-3 h-3" /></button>
                     <button onClick={() => setShowExplore(ds)} className="p-1.5 rounded hover:bg-white/5 text-white/30 hover:text-white/60" title="Explorar"><Eye className="w-3 h-3" /></button>
-                    <a href={`${API_BASE}/api/datasets/${ds.id}/download/`} className="p-1.5 rounded hover:bg-white/5 text-white/30 hover:text-white/60" onClick={(e) => e.stopPropagation()}><Download className="w-3 h-3" /></a>
+                    <a href={`${API_BASE}/datasets/${ds.id}/download/`} className="p-1.5 rounded hover:bg-white/5 text-white/30 hover:text-white/60" onClick={(e) => e.stopPropagation()}><Download className="w-3 h-3" /></a>
                     <button onClick={() => handleDelete(ds.id)} className="p-1.5 rounded hover:bg-red-500/10 text-white/30 hover:text-red-400"><Trash2 className="w-3 h-3" /></button>
                   </div>
                 </div>
@@ -887,7 +961,7 @@ export default function FileManager() {
             try {
               const headers = await getHeaders();
               headers["Content-Type"] = "application/json";
-              const res = await fetch(`${API_BASE}/api/datasets/merge`, {
+              const res = await fetch(`${API_BASE}/datasets/merge`, {
                 method: "POST", headers,
                 body: JSON.stringify({ dataset_ids: ids, file_name: name, type, join_column: joinCol }),
               });
@@ -966,7 +1040,7 @@ function VersionModal({ dataset, onRestore, onClose, getHeaders }) {
   const [versions, setVersions] = useState([]);
   useEffect(() => {
     getHeaders().then((h) => {
-      fetch(`${API_BASE}/api/datasets/${dataset.id}/versions`, { headers: h })
+      fetch(`${API_BASE}/datasets/${dataset.id}/versions`, { headers: h })
         .then((r) => r.json()).then(setVersions).catch(() => {});
     });
   }, [dataset.id, getHeaders]);
@@ -1001,7 +1075,7 @@ function ExploreModal({ dataset, onClose, getHeaders }) {
   const [data, setData] = useState(null);
   useEffect(() => {
     getHeaders().then((h) => {
-      fetch(`${API_BASE}/api/datasets/${dataset.id}/explore`, { headers: h })
+      fetch(`${API_BASE}/datasets/${dataset.id}/explore`, { headers: h })
         .then((r) => r.json()).then(setData).catch(() => {});
     });
   }, [dataset.id, getHeaders]);

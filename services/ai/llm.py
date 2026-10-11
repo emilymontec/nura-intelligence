@@ -2,7 +2,7 @@ import os
 import json
 import requests
 from dotenv import load_dotenv
-from .agents import get_agent_options, AGENT_REGISTRY, run_specialist_agent
+from .agents import get_agent_options, AGENT_REGISTRY, run_specialist_agent, run_agent_team
 from .prompts import EXECUTIVE_REPORT_PROMPT, CHAT_ANALYST_PROMPT, AGENT_ROUTER_PROMPT
 
 
@@ -223,13 +223,30 @@ def chat_with_data(question: str, context: dict, history: str, user_info: dict =
             selected_key = "chat"
         else:
             selected_key = route_intent(question, short_context, history)
-        if selected_key in AGENT_REGISTRY:
-            agent = AGENT_REGISTRY[selected_key]
-            if not (agent.requires_dataset and not has_dataset):
-                def run_specialist_callback(system_message, prompt, temperature=0.25):
-                    human_system = f"Eres {agent.name}. Hablas de forma clara, amable y sin tecnicismos."
-                    return _run_completion(human_system, prompt, temperature, tier="standard")
-                return run_specialist_agent(agent, question, short_context, history, industry, run_specialist_callback)
+
+        # El router puede devolver hasta 2 keys separados por coma cuando la
+        # pregunta amerita varias perspectivas a la vez (ver
+        # AGENT_ROUTER_PROMPT). Antes solo se usaba el primer/único key.
+        candidate_keys = [k.strip() for k in selected_key.split(",") if k.strip()]
+        selected_agents = []
+        for key in candidate_keys[:2]:
+            agent = AGENT_REGISTRY.get(key)
+            if agent and not (agent.requires_dataset and not has_dataset):
+                selected_agents.append(agent)
+
+        if selected_agents:
+            def run_specialist_callback(system_message, prompt, temperature=0.25):
+                human_system = f"{system_message} Hablas de forma clara, amable y sin tecnicismos."
+                return _run_completion(human_system, prompt, temperature, tier="standard")
+
+            def run_synthesis_callback(system_message, prompt, temperature=0.3):
+                return _run_completion(system_message, prompt, temperature, tier="standard")
+
+            return run_agent_team(
+                selected_agents, question, short_context, history, industry,
+                specialist_callback=run_specialist_callback,
+                synthesis_callback=run_synthesis_callback,
+            )
         prompt = CHAT_ANALYST_PROMPT.format(
             context=short_context,
             history=history,

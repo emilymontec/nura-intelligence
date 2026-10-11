@@ -12,6 +12,7 @@
   --animate-pulse-slow: pulse 12s infinite;
   --animate-scanline: scanline 8s linear infinite;
   --animate-subtle-float: subtleFloat 8s ease-in-out infinite;
+  --animate-gradient-drift: gradientDrift 22s ease-in-out infinite;
 }
 
 @keyframes pulse {
@@ -27,6 +28,13 @@
 @keyframes subtleFloat {
   0%, 100% { transform: translateY(0px); }
   50% { transform: translateY(-6px); }
+}
+
+@keyframes gradientDrift {
+  0%   { transform: translate(0%, 0%) scale(1); }
+  33%  { transform: translate(4%, 6%) scale(1.08); }
+  66%  { transform: translate(-3%, -4%) scale(0.96); }
+  100% { transform: translate(0%, 0%) scale(1); }
 }
 
 .pure-glass {

@@ -79,7 +79,7 @@ function PasswordReset() {
           )}
 
           <div className="pt-4 flex items-center justify-center gap-4 text-xs font-mono">
-            <Link to="/auth/login" className="text-white/40 hover:text-white transition-colors">
+            <Link to="/login" className="text-white/40 hover:text-white transition-colors">
               Volver a Iniciar Sesión
             </Link>
           </div>

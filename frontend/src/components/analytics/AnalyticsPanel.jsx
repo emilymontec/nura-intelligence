@@ -1,6 +1,8 @@
-
+import { useRef } from 'react';
 import { Chart as ChartJS, CategoryScale, LinearScale, PointElement, LineElement, BarElement, Title, Tooltip, Legend } from 'chart.js';
-import { Line, Bar } from 'react-chartjs-2';
+import { Line, Bar, Scatter } from 'react-chartjs-2';
+import ChartExportButtons from './ChartExportButtons';
+import HeatmapChart from './HeatmapChart';
 
 ChartJS.register(
   CategoryScale,
@@ -15,6 +17,8 @@ ChartJS.register(
 
 export default function AnalyticsPanel({ datasetContext, onClose }) {
   const { summary, health, preview, charts, columns } = datasetContext;
+  const chartRefs = useRef({});
+  const heatmapCanvasRefs = useRef({});
 
   const renderCharts = () => {
     if (!charts || charts.length === 0) return null;
@@ -47,9 +51,12 @@ export default function AnalyticsPanel({ datasetContext, onClose }) {
 
         return (
           <div key={index} className="chart-card">
-            <h4>{chart.column}</h4>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <h4>{chart.column}</h4>
+              <ChartExportButtons name={chart.column} getCanvas={() => chartRefs.current[index]?.canvas} />
+            </div>
             <div className="chart-canvas-wrapper">
-              <Line data={data} options={options} />
+              <Line ref={(el) => { chartRefs.current[index] = el; }} data={data} options={options} />
             </div>
           </div>
         );
@@ -82,9 +89,12 @@ export default function AnalyticsPanel({ datasetContext, onClose }) {
 
         return (
           <div key={index} className="chart-card">
-            <h4>{chart.column}</h4>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <h4>{chart.column}</h4>
+              <ChartExportButtons name={chart.column} getCanvas={() => chartRefs.current[index]?.canvas} />
+            </div>
             <div className="chart-canvas-wrapper">
-              <Bar data={data} options={options} />
+              <Bar ref={(el) => { chartRefs.current[index] = el; }} data={data} options={options} />
             </div>
           </div>
         );
@@ -126,9 +136,77 @@ export default function AnalyticsPanel({ datasetContext, onClose }) {
 
         return (
           <div key={index} className="chart-card">
-            <h4>{title}</h4>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <h4>{title}</h4>
+              <ChartExportButtons name={title} getCanvas={() => chartRefs.current[index]?.canvas} />
+            </div>
             <div className="chart-canvas-wrapper">
-              <Line data={data} options={options} />
+              <Line ref={(el) => { chartRefs.current[index] = el; }} data={data} options={options} />
+            </div>
+          </div>
+        );
+      }
+
+      if (chart.type === 'scatter' && chart.points) {
+        const data = {
+          datasets: [
+            {
+              label: chart.column,
+              data: chart.points,
+              backgroundColor: 'rgba(79, 123, 255, 0.6)',
+              borderColor: '#4F7BFF',
+            },
+          ],
+        };
+
+        const options = {
+          responsive: true,
+          plugins: {
+            legend: { position: 'top' },
+          },
+          scales: {
+            x: {
+              title: { display: true, text: chart.x_label || '', color: '#999' },
+              grid: { color: 'rgba(255, 255, 255, 0.05)' },
+              ticks: { color: '#ccc' },
+            },
+            y: {
+              title: { display: true, text: chart.y_label || '', color: '#999' },
+              grid: { color: 'rgba(255, 255, 255, 0.05)' },
+              ticks: { color: '#ccc' },
+            },
+          },
+        };
+
+        return (
+          <div key={index} className="chart-card">
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <h4>{chart.column}</h4>
+              <ChartExportButtons name={chart.column} getCanvas={() => chartRefs.current[index]?.canvas} />
+            </div>
+            <div className="chart-canvas-wrapper">
+              <Scatter ref={(el) => { chartRefs.current[index] = el; }} data={data} options={options} />
+            </div>
+          </div>
+        );
+      }
+
+      if (chart.type === 'heatmap' && chart.labels && chart.cells) {
+        return (
+          <div key={index} className="chart-card">
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <h4>{chart.column}</h4>
+              <ChartExportButtons name={chart.column} getCanvas={() => heatmapCanvasRefs.current[index]} />
+            </div>
+            <div className="chart-canvas-wrapper">
+              <HeatmapChart
+                labels={chart.labels}
+                cells={chart.cells}
+                canvasRef={{
+                  get current() { return heatmapCanvasRefs.current[index]; },
+                  set current(val) { heatmapCanvasRefs.current[index] = val; },
+                }}
+              />
             </div>
           </div>
         );

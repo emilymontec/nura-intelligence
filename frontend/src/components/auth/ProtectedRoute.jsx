@@ -8,7 +8,7 @@ function ProtectedRoute({ children }) {
     return <div className="loading-screen">Cargando...</div>;
   }
 
-  return user ? children : <Navigate to="/auth/login" replace />;
+  return user ? children : <Navigate to="/login" replace />;
 }
 
 export default ProtectedRoute;

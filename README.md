@@ -19,8 +19,8 @@ Por defecto, si no configuras `DATABASE_URL` en `.env`, el proyecto usa **SQLite
 ```bash
 cd frontend
 cp .env.example .env
-npm install
-npm run dev
+pnpm install
+pnpm dev
 ```
 
 **3. Abre la app en el navegador:**

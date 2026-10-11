@@ -1,3 +1,5 @@
+import hashlib
+import uuid
 import io
 import json
 import traceback
@@ -15,24 +17,42 @@ from django.db.models import Q, Count
 from django.db import models, IntegrityError
 
 from rest_framework.decorators import api_view, permission_classes
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.parsers import MultiPartParser, FormParser
+from rest_framework_simplejwt.tokens import RefreshToken
 
-from .models import ChatSession, ChatMessage, UserProfile, Workspace, Dataset, FileCategory, DatasetTag, DatasetVersion
-from .serializers import UserProfileSerializer, UserSerializer, WorkspaceSerializer, DatasetSerializer, FileCategorySerializer, DatasetTagSerializer, DatasetVersionSerializer
+from .models import ChatSession, ChatMessage, UserProfile, Workspace, Dataset, FileCategory, DatasetTag, DatasetVersion, Organization, Membership, Dashboard
+from .serializers import UserProfileSerializer, UserSerializer, WorkspaceSerializer, DatasetSerializer, FileCategorySerializer, DatasetTagSerializer, DatasetVersionSerializer, OrganizationSerializer, MembershipSerializer, DashboardSerializer
 from . import quotas
 from . import reports
+from .tasks import analyze_dataset_task
 from analytics.analyzer import (
     load_csv, prepare_dataframe, dataset_summary, column_info, evaluate_business,
     analyze_numeric_trends, compute_correlations, detect_industry,
     get_business_context, detect_critical_variables, detect_anomalies,
     check_fraud_signals, simple_forecast, get_chart_data, get_preview, get_kpis,
-    search_records, filter_records
+    search_records, filter_records, _json_to_dataframe
 )
 from analytics.utils import make_json_safe
 from ai.llm import generate_ai_report, chat_with_data
+
+
+def read_dataset_dataframe(dataset) -> pd.DataFrame:
+    """
+    Lee el archivo de un Dataset ya guardado y lo convierte a DataFrame,
+    soportando CSV/XLSX/JSON de forma centralizada.
+
+    Antes de este cambio, 5 vistas distintas (merge, explore, statistics,
+    search, filter) repetían el mismo patrón `if file_type == 'csv' ...
+    elif file_type == 'xlsx' ... else: no soportado`, lo que significaba
+    que un dataset JSON válido (ya analizado correctamente al subirlo)
+    quedaba inutilizable en todas esas operaciones. Se reusa `load_csv`,
+    que ya sabe leer los tres formatos.
+    """
+    dataset.file.seek(0)
+    return load_csv(dataset.file)
 
 User = get_user_model()
 
@@ -138,9 +158,24 @@ class MemoryManager:
         for msg in messages:
             history_parts.append(f"{msg.role.upper()}: {msg.content}")
         raw = "\n".join(history_parts)
+
+        parts = []
         if rolling:
-            return f"[Resumen de conversación previa]:\n{rolling}\n\n[Últimos mensajes]:\n{raw}"
-        return raw
+            parts.append(f"[Resumen de conversación previa]:\n{rolling}")
+
+        # Memoria de largo plazo (Módulo 3): busca en TODAS las demás
+        # sesiones del usuario mensajes semánticamente relacionados con la
+        # pregunta actual. Antes, el agente 'context' prometía "recordar
+        # otros chats" pero no tenía ninguna forma real de verlos.
+        if question:
+            from .memory_search import search_relevant_history, format_memory_block
+            matches = search_relevant_history(user, question, exclude_session_id=session_id)
+            memory_block = format_memory_block(matches)
+            if memory_block:
+                parts.append(memory_block)
+
+        parts.append(f"[Últimos mensajes]:\n{raw}")
+        return "\n\n".join(parts)
 
 
 memory = MemoryManager()
@@ -275,7 +310,7 @@ def analyze_endpoint(request):
     memory.add_message(session_id, "user", f"Archivo cargado: {file.name}", user)
     try:
         suffix = file.name.lower().split('.')[-1]
-        if suffix not in ['csv', 'xlsx', 'xls', 'pdf', 'docx', 'doc']:
+        if suffix not in ['csv', 'xlsx', 'xls', 'json', 'pdf', 'docx', 'doc']:
             return Response({"status": "rag_only", "file_name": file.name, "response": "Archivo cargado."})
         if suffix == 'docx':
             # Antes: los .docx solo se guardaban sin extraer contenido, y el
@@ -304,12 +339,42 @@ def analyze_endpoint(request):
                 )
                 memory.add_message(session_id, "assistant", response_text, user)
                 return Response({"status": "rag_only", "file_name": file.name, "response": response_text})
-        if suffix in ['pdf', 'doc']:
-            # La lectura de contenido para .pdf y .doc (legado) todavía no
-            # está implementada (falta una librería de extracción de texto
-            # en requirements.txt, p. ej. pdfplumber/PyMuPDF). Por ahora se
+        if suffix == 'pdf':
+            # Módulo 3 — antes: los .pdf no se leían por falta de una
+            # librería de extracción de texto. Ahora se usa pdfplumber.
+            try:
+                import pdfplumber
+                file.seek(0)
+                pages_text = []
+                with pdfplumber.open(file) as pdf:
+                    for page in pdf.pages[:50]:  # límite razonable de páginas
+                        text = page.extract_text() or ""
+                        if text.strip():
+                            pages_text.append(text)
+                full_text = "\n\n".join(pages_text)
+                if not full_text.strip():
+                    raise ValueError("El PDF no contiene texto extraíble (¿está escaneado como imagen?).")
+                rag_context = {"file_name": file.name, "mode": "rag_document", "content": full_text}
+                memory.store_dataset_context(session_id, rag_context, user)
+                response_text = (
+                    f"Leí el PDF '{file.name}' ({len(pages_text)} páginas con texto, {len(full_text)} caracteres). "
+                    "Ya puedes hacerme preguntas sobre su contenido."
+                )
+                memory.add_message(session_id, "assistant", response_text, user)
+                quotas.increment_message_usage(user)
+                return Response({"status": "rag_ready", "file_name": file.name, "response": response_text})
+            except Exception as e:
+                response_text = (
+                    f"El archivo '{file.name}' se guardó, pero no pude leer su contenido "
+                    f"({str(e)}), así que no podré responder preguntas sobre él."
+                )
+                memory.add_message(session_id, "assistant", response_text, user)
+                return Response({"status": "rag_only", "file_name": file.name, "response": response_text})
+        if suffix == 'doc':
+            # El formato .doc binario legado (pre-2007) no tiene una
+            # librería de extracción liviana equivalente a python-docx; se
             # informa honestamente en vez de fingir que sí se analizó.
-            response_text = f"El archivo '{file.name}' fue cargado correctamente. El análisis detallado está disponible para archivos CSV, Excel y Word (.docx). Para este tipo de archivo ({suffix.upper()}), por ahora solo se almacena; la lectura de su contenido aún no está implementada."
+            response_text = f"El archivo '{file.name}' fue cargado correctamente. El análisis detallado está disponible para CSV, Excel, Word (.docx) y PDF. El formato .doc antiguo por ahora solo se almacena."
             memory.add_message(session_id, "assistant", response_text, user)
             return Response({"status": "rag_only", "file_name": file.name, "response": response_text})
         file.seek(0)
@@ -487,9 +552,10 @@ def export_session_report_pdf(request, session_id):
     except ChatSession.DoesNotExist:
         return Response({"error": "Sesión no encontrada"}, status=status.HTTP_404_NOT_FOUND)
 
+    audience = request.query_params.get('audience', 'executive')
     try:
         user_name = getattr(request.user, 'first_name', '') or request.user.email
-        pdf_bytes = reports.generate_pdf_report(session.dataset_context, generated_for=user_name)
+        pdf_bytes = reports.generate_pdf_report(session.dataset_context, generated_for=user_name, audience=audience)
     except ValueError as e:
         return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
     except Exception as e:
@@ -505,6 +571,64 @@ def export_session_report_pdf(request, session_id):
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
+def export_session_report_docx(request, session_id):
+    """Igual que export_session_report_pdf pero en formato Word editable."""
+    try:
+        session = ChatSession.objects.get(session_id=session_id, user=request.user)
+    except ChatSession.DoesNotExist:
+        return Response({"error": "Sesión no encontrada"}, status=status.HTTP_404_NOT_FOUND)
+
+    audience = request.query_params.get('audience', 'executive')
+    try:
+        user_name = getattr(request.user, 'first_name', '') or request.user.email
+        docx_bytes = reports.generate_docx_report(session.dataset_context, generated_for=user_name, audience=audience)
+    except ValueError as e:
+        return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+    except Exception as e:
+        traceback.print_exc()
+        return Response({"error": f"No se pudo generar el DOCX: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    file_name = session.dataset_context.get("file_name", "dataset")
+    safe_name = "".join(c for c in file_name.rsplit(".", 1)[0] if c.isalnum() or c in (" ", "-", "_")).strip() or "reporte"
+    response = HttpResponse(
+        docx_bytes,
+        content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    )
+    response["Content-Disposition"] = f'attachment; filename="reporte_{safe_name}.docx"'
+    return response
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def export_session_report_pptx(request, session_id):
+    """Igual que export_session_report_pdf pero como diapositivas PowerPoint."""
+    try:
+        session = ChatSession.objects.get(session_id=session_id, user=request.user)
+    except ChatSession.DoesNotExist:
+        return Response({"error": "Sesión no encontrada"}, status=status.HTTP_404_NOT_FOUND)
+
+    audience = request.query_params.get('audience', 'executive')
+    try:
+        user_name = getattr(request.user, 'first_name', '') or request.user.email
+        pptx_bytes = reports.generate_pptx_report(session.dataset_context, generated_for=user_name, audience=audience)
+    except ValueError as e:
+        return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+    except Exception as e:
+        traceback.print_exc()
+        return Response({"error": f"No se pudo generar el PPTX: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    file_name = session.dataset_context.get("file_name", "dataset")
+    safe_name = "".join(c for c in file_name.rsplit(".", 1)[0] if c.isalnum() or c in (" ", "-", "_")).strip() or "reporte"
+    response = HttpResponse(
+        pptx_bytes,
+        content_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    )
+    response["Content-Disposition"] = f'attachment; filename="reporte_{safe_name}.pptx"'
+    return response
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
 def workspace_usage(request):
     """Uso actual vs límites del plan: almacenamiento, datasets y mensajes/día."""
     workspace, _ = Workspace.objects.get_or_create(
@@ -514,6 +638,221 @@ def workspace_usage(request):
 
 
 # Dataset Endpoints
+
+def create_dataset_from_django_file(user, workspace, django_file):
+    """
+    Lógica compartida para crear un Dataset a partir de un archivo Django
+    ya en memoria/disco (InMemoryUploadedFile, TemporaryUploadedFile o
+    ContentFile). La usan la subida normal, el import por URL, el import
+    por base de datos externa, y el ensamblado de archivos grandes por
+    chunks — para no duplicar validación/cuotas/hash/análisis en 4 lugares.
+    Devuelve una Response lista para retornar desde la vista.
+    """
+    try:
+        quotas.check_storage_quota(workspace, django_file.size)
+        quotas.check_dataset_count_quota(workspace)
+    except quotas.QuotaExceeded as e:
+        return Response({"error": e.message, "code": e.code}, status=status.HTTP_402_PAYMENT_REQUIRED)
+
+    is_valid, errors, file_type = validate_file(django_file)
+    django_file.seek(0)
+
+    file_hash = Dataset.compute_file_hash_static(django_file)
+    django_file.seek(0)
+
+    existing = Dataset.objects.filter(file_hash=file_hash, workspace=workspace).first()
+    if existing:
+        return Response(
+            {"error": "Ya existe un archivo idéntico en tu workspace", "existing": DatasetSerializer(existing).data},
+            status=status.HTTP_409_CONFLICT
+        )
+
+    dataset = Dataset(
+        file=django_file,
+        original_name=django_file.name,
+        file_name=django_file.name,
+        file_size=django_file.size,
+        file_type=file_type or 'unknown',
+        uploaded_by=user,
+        workspace=workspace,
+        status='valid' if is_valid else 'invalid',
+        validation_errors=errors,
+    )
+    try:
+        dataset.save()
+    except IntegrityError:
+        return Response({"error": "Ya existe un archivo idéntico en tu workspace"}, status=status.HTTP_409_CONFLICT)
+
+    if is_valid and file_type in ['csv', 'xlsx', 'json']:
+        dataset.status = 'processing'
+        dataset.save(update_fields=['status'])
+        analyze_dataset_task.delay(dataset.id)
+        dataset.refresh_from_db()
+
+    return Response(DatasetSerializer(dataset).data, status=status.HTTP_201_CREATED)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def dataset_import_url(request):
+    """
+    Módulo 2 — carga de datos desde fuentes externas (APIs).
+    Descarga un JSON desde una URL y lo convierte en un dataset, igual que
+    si se hubiera subido un archivo .json manualmente. Reutiliza el mismo
+    parser tolerante (_json_to_dataframe) construido para el soporte JSON.
+    """
+    import requests as req_lib
+    from django.core.files.base import ContentFile
+
+    url = (request.data.get('url') or '').strip()
+    name = (request.data.get('name') or '').strip()
+    if not url:
+        return Response({"error": "Se requiere una URL"}, status=status.HTTP_400_BAD_REQUEST)
+    if not (url.startswith('http://') or url.startswith('https://')):
+        return Response({"error": "La URL debe empezar con http:// o https://"}, status=status.HTTP_400_BAD_REQUEST)
+
+    workspace, _ = Workspace.objects.get_or_create(owner=request.user)
+
+    try:
+        resp = req_lib.get(url, timeout=15, headers={"User-Agent": "Nura-Intelligence/1.0"})
+        resp.raise_for_status()
+    except req_lib.RequestException as e:
+        return Response({"error": f"No se pudo descargar la URL: {e}"}, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        raw = resp.json()
+        df = _json_to_dataframe(raw)
+    except Exception as e:
+        return Response({"error": f"La URL no devolvió un JSON tabular válido: {e}"}, status=status.HTTP_400_BAD_REQUEST)
+
+    csv_bytes = df.to_csv(index=False).encode('utf-8')
+    file_name = f"{name or 'import_url'}.csv"
+    django_file = ContentFile(csv_bytes, name=file_name)
+    django_file.size = len(csv_bytes)
+
+    response = create_dataset_from_django_file(request.user, workspace, django_file)
+    if response.status_code == status.HTTP_201_CREATED:
+        Dataset.objects.filter(pk=response.data['id']).update(source_url=url)
+        response.data['source_url'] = url
+    return response
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def dataset_import_db(request):
+    """
+    Módulo 2 — carga de datos desde bases de datos externas.
+    Las credenciales viajan solo en este request (nunca se guardan), se
+    usan para una única consulta SELECT validada, y se descartan. Ver
+    services/chat/db_connector.py para el detalle de las validaciones de
+    seguridad (solo lectura, sin sentencias apiladas, sin comentarios).
+    """
+    from .db_connector import build_safe_connection_url, run_read_only_query, UnsafeQueryError
+    from django.core.files.base import ContentFile
+
+    dialect = (request.data.get('dialect') or '').strip()
+    host = (request.data.get('host') or '').strip()
+    port = (request.data.get('port') or '').strip()
+    database = (request.data.get('database') or '').strip()
+    username = (request.data.get('username') or '').strip()
+    password = request.data.get('password') or ''
+    query = request.data.get('query') or ''
+    name = (request.data.get('name') or '').strip()
+
+    if not all([dialect, host, port, database, query]):
+        return Response(
+            {"error": "Se requieren: dialect, host, port, database y query."},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    workspace, _ = Workspace.objects.get_or_create(owner=request.user)
+
+    try:
+        connection_url = build_safe_connection_url(dialect, host, port, database, username, password)
+        df = run_read_only_query(connection_url, query)
+    except UnsafeQueryError as e:
+        return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+    except Exception as e:
+        return Response({"error": f"No se pudo conectar o consultar la base de datos: {e}"}, status=status.HTTP_400_BAD_REQUEST)
+
+    if df.empty or len(df.columns) == 0:
+        return Response({"error": "La consulta no devolvió datos."}, status=status.HTTP_400_BAD_REQUEST)
+
+    csv_bytes = df.to_csv(index=False).encode('utf-8')
+    file_name = f"{name or 'import_db'}.csv"
+    django_file = ContentFile(csv_bytes, name=file_name)
+    django_file.size = len(csv_bytes)
+    return create_dataset_from_django_file(request.user, workspace, django_file)
+
+
+CHUNK_UPLOAD_DIR = os.path.join(settings.MEDIA_ROOT, 'chunk_uploads')
+MAX_CHUNKS = 2000  # ~2000 chunks * 5MB = 10GB tope absoluto
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def dataset_upload_chunk(request):
+    """
+    Módulo 2 — subida en partes (chunked upload) para archivos grandes.
+    El cliente parte el archivo en pedazos (p. ej. 5 MB cada uno), genera
+    un `upload_id` único por archivo, y va mandando cada pedazo con su
+    `chunk_index` y `total_chunks`. Esta vista los va guardando en disco
+    por separado; cuando llega el último, los ensambla en orden y crea el
+    Dataset con la misma lógica que una subida normal (cuotas, hash,
+    análisis asíncrono).
+    """
+    import re as re_module
+
+    upload_id = (request.data.get('upload_id') or '').strip()
+    file_name = (request.data.get('file_name') or '').strip()
+    chunk_index = request.data.get('chunk_index')
+    total_chunks = request.data.get('total_chunks')
+    chunk = request.FILES.get('chunk')
+
+    if not upload_id or not file_name or chunk is None:
+        return Response({"error": "Se requieren upload_id, file_name y chunk"}, status=status.HTTP_400_BAD_REQUEST)
+    if not re_module.match(r'^[a-zA-Z0-9_-]{8,100}$', upload_id):
+        return Response({"error": "upload_id inválido"}, status=status.HTTP_400_BAD_REQUEST)
+    try:
+        chunk_index = int(chunk_index)
+        total_chunks = int(total_chunks)
+    except (TypeError, ValueError):
+        return Response({"error": "chunk_index y total_chunks deben ser enteros"}, status=status.HTTP_400_BAD_REQUEST)
+    if total_chunks <= 0 or total_chunks > MAX_CHUNKS or not (0 <= chunk_index < total_chunks):
+        return Response({"error": "chunk_index/total_chunks fuera de rango"}, status=status.HTTP_400_BAD_REQUEST)
+
+    workspace, _ = Workspace.objects.get_or_create(owner=request.user)
+
+    upload_dir = os.path.join(CHUNK_UPLOAD_DIR, str(request.user.id), upload_id)
+    os.makedirs(upload_dir, exist_ok=True)
+    chunk_path = os.path.join(upload_dir, f"{chunk_index}.part")
+    with open(chunk_path, 'wb') as f:
+        for block in chunk.chunks():
+            f.write(block)
+
+    received = len([f for f in os.listdir(upload_dir) if f.endswith('.part')])
+    if received < total_chunks:
+        return Response({"status": "chunk_received", "received": received, "total": total_chunks})
+
+    try:
+        from django.core.files.base import ContentFile
+        assembled = io.BytesIO()
+        for i in range(total_chunks):
+            part_path = os.path.join(upload_dir, f"{i}.part")
+            if not os.path.exists(part_path):
+                return Response({"error": f"Falta el pedazo {i} de {total_chunks}"}, status=status.HTTP_400_BAD_REQUEST)
+            with open(part_path, 'rb') as pf:
+                assembled.write(pf.read())
+        assembled.seek(0)
+        size = assembled.getbuffer().nbytes
+        django_file = ContentFile(assembled.read(), name=file_name)
+        django_file.size = size
+        return create_dataset_from_django_file(request.user, workspace, django_file)
+    finally:
+        import shutil
+        shutil.rmtree(upload_dir, ignore_errors=True)
+
+
 @api_view(['GET', 'POST'])
 @permission_classes([IsAuthenticated])
 def dataset_list_create(request):
@@ -613,19 +952,18 @@ def dataset_list_create(request):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
         
-        # Si es válido, analizarlo
-        if is_valid and file_type in ['csv', 'xlsx']:
-            try:
-                file.seek(0)
-                context = get_analytics_context(file, file.name)
-                dataset.analysis_context = make_json_safe(context)
-                dataset.status = 'valid'
-                dataset.save()
-            except Exception as e:
-                dataset.status = 'invalid'
-                dataset.validation_errors.append(f"Error en análisis: {str(e)}")
-                dataset.save()
-        
+        # Análisis asíncrono vía Celery (Módulo 2). Antes: el análisis
+        # corría síncrono aquí mismo, bloqueando la respuesta HTTP hasta
+        # terminar de leer/limpiar/analizar el archivo completo. Sin Redis
+        # configurado, Celery corre en modo eager (síncrono en el mismo
+        # proceso) — por eso se refresca `dataset` desde la BD después de
+        # encolar, para que la respuesta ya incluya el resultado en local.
+        if is_valid and file_type in ['csv', 'xlsx', 'json']:
+            dataset.status = 'processing'
+            dataset.save(update_fields=['status'])
+            analyze_dataset_task.delay(dataset.id)
+            dataset.refresh_from_db()
+
         serializer = DatasetSerializer(dataset)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 
@@ -944,12 +1282,9 @@ def dataset_merge(request):
     try:
         frames = []
         for ds in datasets:
-            ds.file.seek(0)
-            if ds.file_type == 'csv':
-                df = pd.read_csv(ds.file)
-            elif ds.file_type == 'xlsx':
-                df = pd.read_excel(ds.file)
-            else:
+            try:
+                df = read_dataset_dataframe(ds)
+            except Exception:
                 continue
             frames.append(df)
 
@@ -1209,13 +1544,10 @@ def dataset_preview(request, pk):
 
     n = int(request.query_params.get('rows', 10))
     try:
-        dataset.file.seek(0)
-        if dataset.file_type == 'csv':
-            df = pd.read_csv(dataset.file)
-        elif dataset.file_type == 'xlsx':
-            df = pd.read_excel(dataset.file)
-        else:
-            return Response({"error": "Tipo de archivo no soportado"}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            df = read_dataset_dataframe(dataset)
+        except Exception as e:
+            return Response({"error": f"No se pudo leer el dataset: {e}"}, status=status.HTTP_400_BAD_REQUEST)
 
         preview = get_preview(df, n)
         return Response({"preview": preview, "total_rows": len(df), "columns": list(df.columns)})
@@ -1273,18 +1605,282 @@ def dataset_search(request, pk):
         return Response({"error": "Se requiere un parámetro 'q'"}, status=status.HTTP_400_BAD_REQUEST)
 
     try:
-        dataset.file.seek(0)
-        if dataset.file_type == 'csv':
-            df = pd.read_csv(dataset.file)
-        elif dataset.file_type == 'xlsx':
-            df = pd.read_excel(dataset.file)
-        else:
-            return Response({"error": "Tipo de archivo no soportado"}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            df = read_dataset_dataframe(dataset)
+        except Exception as e:
+            return Response({"error": f"No se pudo leer el dataset: {e}"}, status=status.HTTP_400_BAD_REQUEST)
 
         results = search_records(df, q, col, max_r)
         return Response(results)
     except Exception as e:
         return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+def _get_membership_or_403(organization, user, roles_allowed=None):
+    """Devuelve la Membership del usuario en la organización, o None si no
+    pertenece o su rol no está en roles_allowed (cuando se especifica)."""
+    m = Membership.objects.filter(organization=organization, user=user).first()
+    if not m:
+        return None
+    if roles_allowed and m.role not in roles_allowed:
+        return None
+    return m
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated])
+def organization_list_create(request):
+    """
+    Módulo 1 — organizaciones y roles (antes: 1 usuario = 1 workspace, sin
+    jerarquías ni forma de colaborar en equipo).
+    """
+    if request.method == 'GET':
+        orgs = Organization.objects.filter(memberships__user=request.user).distinct()
+        return Response(OrganizationSerializer(orgs, many=True, context={'request': request}).data)
+
+    name = (request.data.get('name') or '').strip()
+    if not name:
+        return Response({"error": "El nombre de la organización es obligatorio"}, status=status.HTTP_400_BAD_REQUEST)
+    org = Organization.objects.create(name=name, owner=request.user)
+    Membership.objects.create(organization=org, user=request.user, role='owner')
+    return Response(OrganizationSerializer(org, context={'request': request}).data, status=status.HTTP_201_CREATED)
+
+
+@api_view(['GET', 'PATCH', 'DELETE'])
+@permission_classes([IsAuthenticated])
+def organization_detail(request, pk):
+    try:
+        org = Organization.objects.get(pk=pk)
+    except Organization.DoesNotExist:
+        return Response({"error": "Organización no encontrada"}, status=status.HTTP_404_NOT_FOUND)
+
+    membership = _get_membership_or_403(org, request.user)
+    if not membership:
+        return Response({"error": "No perteneces a esta organización"}, status=status.HTTP_404_NOT_FOUND)
+
+    if request.method == 'GET':
+        return Response(OrganizationSerializer(org, context={'request': request}).data)
+
+    if membership.role not in ('owner', 'admin'):
+        return Response({"error": "Solo el propietario o un administrador pueden editar la organización"}, status=status.HTTP_403_FORBIDDEN)
+
+    if request.method == 'PATCH':
+        name = (request.data.get('name') or '').strip()
+        if name:
+            org.name = name
+            org.save(update_fields=['name'])
+        return Response(OrganizationSerializer(org, context={'request': request}).data)
+
+    if request.method == 'DELETE':
+        if membership.role != 'owner':
+            return Response({"error": "Solo el propietario puede eliminar la organización"}, status=status.HTTP_403_FORBIDDEN)
+        org.delete()
+        return Response({"status": "ok"})
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated])
+def organization_members(request, pk):
+    try:
+        org = Organization.objects.get(pk=pk)
+    except Organization.DoesNotExist:
+        return Response({"error": "Organización no encontrada"}, status=status.HTTP_404_NOT_FOUND)
+
+    membership = _get_membership_or_403(org, request.user)
+    if not membership:
+        return Response({"error": "No perteneces a esta organización"}, status=status.HTTP_404_NOT_FOUND)
+
+    if request.method == 'GET':
+        members = org.memberships.select_related('user').all()
+        return Response(MembershipSerializer(members, many=True).data)
+
+    # POST: invitar a un usuario ya existente por email (sin envío de
+    # correo real: el usuario debe ya tener cuenta en Nura)
+    if membership.role not in ('owner', 'admin'):
+        return Response({"error": "Solo el propietario o un administrador pueden invitar miembros"}, status=status.HTTP_403_FORBIDDEN)
+
+    email = (request.data.get('email') or '').strip().lower()
+    role = request.data.get('role', 'member')
+    if role not in dict(Membership.ROLE_CHOICES):
+        return Response({"error": "Rol inválido"}, status=status.HTTP_400_BAD_REQUEST)
+    if role == 'owner':
+        return Response({"error": "No se puede invitar directamente como propietario"}, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        target_user = User.objects.get(email__iexact=email)
+    except User.DoesNotExist:
+        return Response({"error": "No existe ningún usuario registrado con ese email"}, status=status.HTTP_404_NOT_FOUND)
+
+    if Membership.objects.filter(organization=org, user=target_user).exists():
+        return Response({"error": "Ese usuario ya pertenece a la organización"}, status=status.HTTP_400_BAD_REQUEST)
+
+    new_membership = Membership.objects.create(organization=org, user=target_user, role=role)
+    return Response(MembershipSerializer(new_membership).data, status=status.HTTP_201_CREATED)
+
+
+@api_view(['PATCH', 'DELETE'])
+@permission_classes([IsAuthenticated])
+def organization_member_detail(request, pk, user_id):
+    try:
+        org = Organization.objects.get(pk=pk)
+    except Organization.DoesNotExist:
+        return Response({"error": "Organización no encontrada"}, status=status.HTTP_404_NOT_FOUND)
+
+    membership = _get_membership_or_403(org, request.user)
+    if not membership:
+        return Response({"error": "No perteneces a esta organización"}, status=status.HTTP_404_NOT_FOUND)
+
+    try:
+        target_membership = Membership.objects.get(organization=org, user_id=user_id)
+    except Membership.DoesNotExist:
+        return Response({"error": "Ese usuario no pertenece a la organización"}, status=status.HTTP_404_NOT_FOUND)
+
+    if membership.role not in ('owner', 'admin'):
+        return Response({"error": "Solo el propietario o un administrador pueden gestionar miembros"}, status=status.HTTP_403_FORBIDDEN)
+
+    if target_membership.role == 'owner':
+        return Response({"error": "No se puede modificar ni eliminar al propietario"}, status=status.HTTP_403_FORBIDDEN)
+
+    if request.method == 'PATCH':
+        new_role = request.data.get('role')
+        if new_role not in ('admin', 'member'):
+            return Response({"error": "Rol inválido"}, status=status.HTTP_400_BAD_REQUEST)
+        if membership.role != 'owner' and new_role == 'admin':
+            return Response({"error": "Solo el propietario puede ascender a administrador"}, status=status.HTTP_403_FORBIDDEN)
+        target_membership.role = new_role
+        target_membership.save(update_fields=['role'])
+        return Response(MembershipSerializer(target_membership).data)
+
+    if request.method == 'DELETE':
+        target_membership.delete()
+        return Response({"status": "ok"})
+
+
+# ============================================================
+# MFA / 2FA (Módulo 1)
+# ============================================================
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def mfa_setup(request):
+    """Genera (o reutiliza) el secreto TOTP del usuario y devuelve la URI
+    para escanear con una app tipo Google Authenticator/Authy. No activa
+    el MFA todavía — eso requiere confirmar un código con /mfa/enable/."""
+    import pyotp
+    profile = request.user.profile
+    if not profile.mfa_secret:
+        profile.mfa_secret = pyotp.random_base32()
+        profile.save(update_fields=['mfa_secret'])
+    totp = pyotp.TOTP(profile.mfa_secret)
+    uri = totp.provisioning_uri(name=request.user.email, issuer_name="Nura Intelligence")
+    return Response({"secret": profile.mfa_secret, "otpauth_uri": uri, "mfa_enabled": profile.mfa_enabled})
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def mfa_enable(request):
+    import pyotp
+    profile = request.user.profile
+    code = (request.data.get('code') or '').strip()
+    if not profile.mfa_secret:
+        return Response({"error": "Primero llama a /auth/mfa/setup/"}, status=status.HTTP_400_BAD_REQUEST)
+    totp = pyotp.TOTP(profile.mfa_secret)
+    if not totp.verify(code, valid_window=1):
+        return Response({"error": "Código incorrecto"}, status=status.HTTP_400_BAD_REQUEST)
+    profile.mfa_enabled = True
+    profile.save(update_fields=['mfa_enabled'])
+    return Response({"status": "ok", "mfa_enabled": True})
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def mfa_disable(request):
+    import pyotp
+    profile = request.user.profile
+    code = (request.data.get('code') or '').strip()
+    if profile.mfa_enabled:
+        totp = pyotp.TOTP(profile.mfa_secret)
+        if not totp.verify(code, valid_window=1):
+            return Response({"error": "Código incorrecto"}, status=status.HTTP_400_BAD_REQUEST)
+    profile.mfa_enabled = False
+    profile.mfa_secret = ''
+    profile.save(update_fields=['mfa_enabled', 'mfa_secret'])
+    return Response({"status": "ok", "mfa_enabled": False})
+
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def mfa_verify_login(request):
+    """
+    Segundo paso del login cuando el usuario tiene MFA activado.
+    Recibe el `mfa_token` efímero emitido por /auth/login/ (ver
+    NuraLoginView) junto con el código TOTP, y si es válido entrega los
+    tokens JWT reales.
+    """
+    import pyotp
+    from django.core.signing import TimestampSigner, BadSignature, SignatureExpired
+
+    mfa_token = request.data.get('mfa_token', '')
+    code = (request.data.get('code') or '').strip()
+    signer = TimestampSigner(salt='nura-mfa-login')
+    try:
+        user_id = signer.unsign(mfa_token, max_age=300)  # 5 minutos para completar el 2º factor
+    except (BadSignature, SignatureExpired):
+        return Response({"error": "Token de MFA inválido o expirado. Vuelve a iniciar sesión."}, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        user = User.objects.get(pk=user_id)
+    except User.DoesNotExist:
+        return Response({"error": "Usuario no encontrado"}, status=status.HTTP_404_NOT_FOUND)
+
+    profile = user.profile
+    if not profile.mfa_enabled or not profile.mfa_secret:
+        return Response({"error": "Este usuario no tiene MFA activado"}, status=status.HTTP_400_BAD_REQUEST)
+
+    totp = pyotp.TOTP(profile.mfa_secret)
+    if not totp.verify(code, valid_window=1):
+        return Response({"error": "Código incorrecto"}, status=status.HTTP_400_BAD_REQUEST)
+
+    refresh = RefreshToken.for_user(user)
+    return Response({
+        "access": str(refresh.access_token),
+        "refresh": str(refresh),
+        "user": UserSerializer(user).data,
+    })
+
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def custom_login_view(request):
+    """
+    Reemplaza el login de dj-rest-auth SOLO para intercalar el segundo
+    factor (MFA) antes de emitir tokens JWT reales. Si el usuario no tiene
+    MFA activado, el comportamiento es idéntico al login normal.
+    """
+    from django.contrib.auth import authenticate
+    from django.core.signing import TimestampSigner
+
+    email = (request.data.get('email') or '').strip().lower()
+    password = request.data.get('password') or ''
+    if not email or not password:
+        return Response({"error": "Email y contraseña son requeridos"}, status=status.HTTP_400_BAD_REQUEST)
+
+    user = authenticate(request, username=email, password=password)
+    if user is None or not user.is_active:
+        return Response({"error": "Credenciales inválidas"}, status=status.HTTP_400_BAD_REQUEST)
+
+    profile = user.profile
+    if profile.mfa_enabled:
+        signer = TimestampSigner(salt='nura-mfa-login')
+        mfa_token = signer.sign(str(user.id))
+        return Response({"mfa_required": True, "mfa_token": mfa_token})
+
+    refresh = RefreshToken.for_user(user)
+    return Response({
+        "access": str(refresh.access_token),
+        "refresh": str(refresh),
+        "user": UserSerializer(user).data,
+    })
 
 
 @api_view(['POST'])
@@ -1303,15 +1899,153 @@ def dataset_filter(request, pk):
         return Response({"error": "Se requieren filtros"}, status=status.HTTP_400_BAD_REQUEST)
 
     try:
-        dataset.file.seek(0)
-        if dataset.file_type == 'csv':
-            df = pd.read_csv(dataset.file)
-        elif dataset.file_type == 'xlsx':
-            df = pd.read_excel(dataset.file)
-        else:
-            return Response({"error": "Tipo de archivo no soportado"}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            df = read_dataset_dataframe(dataset)
+        except Exception as e:
+            return Response({"error": f"No se pudo leer el dataset: {e}"}, status=status.HTTP_400_BAD_REQUEST)
 
         results = filter_records(df, filters, max_r)
         return Response(results)
     except Exception as e:
         return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+# ---------------------------------------------------------------------------
+# Dashboards armables (Módulo 4)
+# ---------------------------------------------------------------------------
+# El "drag & drop" vive en el frontend como reordenamiento de una lista;
+# aquí solo se persiste esa lista (`layout`) tal cual la manda el cliente.
+# Cada widget es {"id", "kind": "kpi"|"chart", "title", "chart_type"?, "source"}.
+
+def _widgets_from_dataset_context(context: dict) -> list:
+    """Construye widgets de dashboard (KPIs + gráficos) a partir de un
+    dataset_context ya calculado — la misma función que alimenta el chat y
+    los reportes PDF/DOCX/PPTX, para no tener una tercera fuente de verdad."""
+    import uuid as uuid_module
+    widgets = []
+    for kpi in (context.get('kpis') or [])[:6]:
+        widgets.append({
+            "id": uuid_module.uuid4().hex[:8],
+            "kind": "kpi",
+            "title": kpi.get("label", "KPI"),
+            "source": {"value": kpi.get("value"), "type": kpi.get("type", "number")},
+        })
+    for chart in (context.get('charts') or []):
+        widgets.append({
+            "id": uuid_module.uuid4().hex[:8],
+            "kind": "chart",
+            "title": chart.get("column", "Gráfico"),
+            "chart_type": chart.get("type"),
+            "source": chart,
+        })
+    return widgets
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated])
+def dashboard_list_create(request):
+    workspace, _ = Workspace.objects.get_or_create(owner=request.user)
+
+    if request.method == 'GET':
+        dashboards = Dashboard.objects.filter(workspace=workspace)
+        return Response(DashboardSerializer(dashboards, many=True).data)
+
+    name = (request.data.get('name') or 'Mi Dashboard').strip() or 'Mi Dashboard'
+    layout = request.data.get('layout', [])
+    if not isinstance(layout, list):
+        return Response({"error": "'layout' debe ser una lista de widgets"}, status=status.HTTP_400_BAD_REQUEST)
+
+    dashboard = Dashboard.objects.create(
+        workspace=workspace, name=name, layout=layout, created_by=request.user,
+    )
+    return Response(DashboardSerializer(dashboard).data, status=status.HTTP_201_CREATED)
+
+
+@api_view(['GET', 'PATCH', 'DELETE'])
+@permission_classes([IsAuthenticated])
+def dashboard_detail(request, pk):
+    workspace, _ = Workspace.objects.get_or_create(owner=request.user)
+    try:
+        dashboard = Dashboard.objects.get(pk=pk, workspace=workspace)
+    except Dashboard.DoesNotExist:
+        return Response({"error": "Dashboard no encontrado"}, status=status.HTTP_404_NOT_FOUND)
+
+    if request.method == 'GET':
+        return Response(DashboardSerializer(dashboard).data)
+
+    if request.method == 'DELETE':
+        dashboard.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    # PATCH: usado tanto para renombrar como para guardar el nuevo orden
+    # de widgets después de arrastrar y soltar en el frontend.
+    name = request.data.get('name')
+    layout = request.data.get('layout')
+    if name is not None:
+        dashboard.name = (name or '').strip() or dashboard.name
+    if layout is not None:
+        if not isinstance(layout, list):
+            return Response({"error": "'layout' debe ser una lista de widgets"}, status=status.HTTP_400_BAD_REQUEST)
+        dashboard.layout = layout
+    dashboard.save()
+    return Response(DashboardSerializer(dashboard).data)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def dashboard_generate_ai(request):
+    """
+    Genera (o regenera) un dashboard automáticamente a partir del último
+    análisis de un dataset: toma sus KPIs y gráficos ya calculados
+    (`analysis_context`) y los convierte en widgets, sin que el usuario
+    tenga que armarlo a mano.
+    """
+    workspace, _ = Workspace.objects.get_or_create(owner=request.user)
+    dataset_id = request.data.get('dataset_id')
+    if not dataset_id:
+        return Response({"error": "Se requiere 'dataset_id'"}, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        dataset = Dataset.objects.get(pk=dataset_id, workspace=workspace)
+    except Dataset.DoesNotExist:
+        return Response({"error": "Dataset no encontrado"}, status=status.HTTP_404_NOT_FOUND)
+
+    context = dataset.analysis_context or {}
+    if not context.get('kpis') and not context.get('charts'):
+        # El dataset no fue analizado todavía (o no tiene columnas numéricas);
+        # lo analizamos ahora mismo para no devolver un dashboard vacío.
+        try:
+            df = read_dataset_dataframe(dataset)
+            df, _ = prepare_dataframe(df)
+            context = {
+                "kpis": get_kpis(df),
+                "charts": get_chart_data(df),
+            }
+        except Exception as e:
+            return Response({"error": f"No se pudo analizar el dataset: {e}"}, status=status.HTTP_400_BAD_REQUEST)
+
+    widgets = _widgets_from_dataset_context(context)
+    if not widgets:
+        return Response(
+            {"error": "El dataset no tiene suficientes datos numéricos/categóricos para generar un dashboard."},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    name = (request.data.get('name') or f"Dashboard IA — {dataset.file_name}").strip()
+    dashboard_id = request.data.get('dashboard_id')
+    if dashboard_id:
+        try:
+            dashboard = Dashboard.objects.get(pk=dashboard_id, workspace=workspace)
+            dashboard.layout = widgets
+            dashboard.dataset = dataset
+            dashboard.is_ai_generated = True
+            dashboard.save()
+        except Dashboard.DoesNotExist:
+            return Response({"error": "Dashboard no encontrado"}, status=status.HTTP_404_NOT_FOUND)
+    else:
+        dashboard = Dashboard.objects.create(
+            workspace=workspace, name=name, layout=widgets, dataset=dataset,
+            is_ai_generated=True, created_by=request.user,
+        )
+
+    return Response(DashboardSerializer(dashboard).data, status=status.HTTP_201_CREATED)

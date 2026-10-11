@@ -42,6 +42,7 @@ function App() {
             <Route path="archivos" element={<MainViewport currentView="archivos" />} />
             <Route path="chat-inteligente" element={<MainViewport currentView="chat-inteligente" />} />
             <Route path="reportes-ia" element={<MainViewport currentView="reportes-ia" />} />
+            <Route path="dashboards" element={<MainViewport currentView="dashboards" />} />
             <Route path="mg-perfil" element={<MainViewport currentView="mg-perfil" />} />
             <Route path="mg-configuracion" element={<MainViewport currentView="mg-configuracion" />} />
             <Route path="mg-suscripcion" element={<MainViewport currentView="mg-suscripcion" />} />
@@ -51,12 +52,12 @@ function App() {
             <Route path="ad-licencias" element={<MainViewport currentView="ad-licencias" />} />
             <Route path="ad-monitoreo" element={<MainViewport currentView="ad-monitoreo" />} />
           </Route>
-          <Route path="/auth/login" element={<Login />} />
-          <Route path="/auth/register" element={<Register />} />
-          <Route path="/auth/password-reset" element={<PasswordReset />} />
-          <Route path="/auth/password-reset/confirm/:uid/:token" element={<PasswordResetConfirm />} />
-          <Route path="/auth/verify-email/:key" element={<VerifyEmail />} />
-          <Route path="/chat" element={
+          <Route path="/login" element={<Login />} />
+          <Route path="/register" element={<Register />} />
+          <Route path="/password-reset" element={<PasswordReset />} />
+          <Route path="/password-reset/confirm/:uid/:token" element={<PasswordResetConfirm />} />
+          <Route path="/verify-email/:key" element={<VerifyEmail />} />
+          <Route path="/asistente" element={
             <ProtectedRoute>
               <ChatApp />
             </ProtectedRoute>

@@ -41,7 +41,7 @@ export default function Pricing() {
               </div>
             </div>
             <Link
-              to="/auth/register"
+              to="/register"
               className="block w-full text-center py-3 rounded-lg bg-nura-electric/20 border border-nura-electric/30 text-nura-electric hover:bg-nura-electric/30 transition-all text-xs font-mono"
             >
               COMENZAR_GRATIS()

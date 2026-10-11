@@ -12,7 +12,7 @@ function Hero() {
         Se conecta a tu ecosistema, capta cada señal operativa en tiempo real y traduce el ruido en decisiones claras — en el mismo lenguaje con el que se lo preguntas. Sin paneles que configurar.
       </p>
       <div className="hero-actions">
-        <button onClick={() => navigate('/chat')} className="btn-primary">Iniciar escucha</button>
+        <button onClick={() => navigate('/asistente')} className="btn-primary">Iniciar escucha</button>
         <a href="#panel" className="btn-secondary">Ver el instrumento en vivo ↓</a>
       </div>
 

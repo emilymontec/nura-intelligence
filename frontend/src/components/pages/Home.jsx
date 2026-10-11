@@ -33,7 +33,7 @@ function Home() {
 
           <div className="flex flex-col sm:flex-row items-center justify-center gap-4 pt-4">
             <Link
-              to="/auth/register"
+              to="/register"
               className="px-8 py-3 rounded bg-white text-nura-black text-sm font-medium hover:bg-white/90 transition-all"
             >
               Comenzar gratis
@@ -177,7 +177,7 @@ function Home() {
               <li className="flex items-center gap-2"><span className="text-nura-electric">✓</span>Exportación básica</li>
             </ul>
             <Link
-              to="/auth/register"
+              to="/register"
               className="block w-full text-center py-3 rounded-lg bg-nura-electric/20 border border-nura-electric/30 text-nura-electric hover:bg-nura-electric/30 transition-all text-sm font-mono"
             >
               Comenzar gratis

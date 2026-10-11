@@ -1,5 +1,6 @@
 from typing import Dict, Any, List, Tuple
 import re
+import json
 import pandas as pd
 import numpy as np
 from .utils import detect_file_type
@@ -11,7 +12,10 @@ from .cleaning import clean_dataframe, detect_headers, detect_language
 
 
 def _is_valid_header_row(values):
-    if not values or len(values) < 2:
+    # Antes: `not values` con un pandas Index de más de un elemento lanza
+    # "ValueError: truth value of a Index is ambiguous" — bug real que
+    # rompía cualquier archivo que pasara por el fallback de CSV.
+    if values is None or len(values) < 2:
         return False
     str_vals = [str(v).strip() for v in values if pd.notna(v)]
     if not str_vals:
@@ -26,6 +30,42 @@ def _is_valid_header_row(values):
     if unique_ratio < 0.5 and len(str_vals) > 3:
         return False
     return True
+
+
+def _json_to_dataframe(raw) -> pd.DataFrame:
+    """
+    Convierte contenido JSON ya parseado (list/dict) a un DataFrame tabular.
+    Soporta las formas más comunes:
+      - Lista de objetos:            [{"a": 1}, {"a": 2}]
+      - Objeto contenedor:           {"data": [...]} / {"results": [...]} / {"items": [...]}
+      - Objeto único:                {"a": 1, "b": 2}
+      - Diccionario de columnas:     {"a": [1, 2], "b": [3, 4]}
+      - Lista de valores simples:    [1, 2, 3]
+    """
+    if isinstance(raw, list):
+        if not raw:
+            raise ValueError("El JSON es una lista vacía.")
+        if all(isinstance(item, dict) for item in raw):
+            return pd.json_normalize(raw)
+        # Lista de valores simples (no objetos)
+        return pd.DataFrame({"value": raw})
+
+    if isinstance(raw, dict):
+        # Contenedor típico de una API: {"data": [...]}, {"results": [...]}, etc.
+        for key in ("data", "results", "items", "records", "rows"):
+            value = raw.get(key)
+            if isinstance(value, list) and value and all(isinstance(item, dict) for item in value):
+                return pd.json_normalize(value)
+
+        # ¿Es un dict de columnas? (todas las claves apuntan a listas de igual longitud)
+        list_values = [v for v in raw.values() if isinstance(v, list)]
+        if list_values and len(list_values) == len(raw) and len({len(v) for v in list_values}) == 1:
+            return pd.DataFrame(raw)
+
+        # Objeto único -> una fila
+        return pd.json_normalize([raw])
+
+    raise ValueError("El JSON no contiene una estructura de datos reconocible (se esperaba una lista o un objeto).")
 
 
 def load_csv(file_obj) -> pd.DataFrame:
@@ -72,6 +112,26 @@ def load_csv(file_obj) -> pd.DataFrame:
             raise ValueError("El Excel está vacío o no contiene columnas válidas.")
         df, headers_fixed = detect_headers(df)
         return df
+
+    if file_type == ".json":
+        # Antes: los .json pasaban la validación de subida pero nunca se
+        # convertían de verdad en un DataFrame — caían al parser de CSV de
+        # abajo, que intentaba leer el JSON como si fuera texto separado
+        # por comas (fallaba o producía análisis sin sentido).
+        try:
+            file_obj.seek(0)
+        except Exception:
+            pass
+        try:
+            raw = json.load(file_obj)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"El archivo JSON no es válido: {e}") from e
+        df = _json_to_dataframe(raw)
+        if df is None or df.empty or len(df.columns) == 0:
+            raise ValueError("El JSON no contiene datos tabulares reconocibles.")
+        df, headers_fixed = detect_headers(df)
+        return df
+
     df = _read_csv_fallback()
     df, headers_fixed = detect_headers(df)
     return df
@@ -251,6 +311,47 @@ def get_chart_data(df: pd.DataFrame) -> List[Dict[str, Any]]:
                 "labels": counts.index.tolist(),
                 "values": counts.values.tolist()
             })
+
+    all_numeric_cols = df.select_dtypes(include=[np.number]).columns
+    # Heatmap de correlación — hasta 8 columnas numéricas para que siga siendo legible
+    if len(all_numeric_cols) >= 2:
+        heat_cols = list(all_numeric_cols[:8])
+        corr_matrix = df[heat_cols].corr()
+        cells = []
+        for r in heat_cols:
+            for c in heat_cols:
+                val = corr_matrix.loc[r, c]
+                cells.append({"row": r, "col": c, "value": round(float(val), 2) if pd.notna(val) else 0})
+        charts.append({
+            "type": "heatmap",
+            "column": "Correlación entre variables",
+            "labels": heat_cols,
+            "cells": cells,
+        })
+
+    # Scatter — el par de columnas numéricas con mayor correlación absoluta
+    if len(all_numeric_cols) >= 2:
+        best_pair = None
+        best_corr = -1
+        corr_matrix = df[all_numeric_cols].corr()
+        for i in range(len(all_numeric_cols)):
+            for j in range(i + 1, len(all_numeric_cols)):
+                c1, c2 = all_numeric_cols[i], all_numeric_cols[j]
+                val = corr_matrix.loc[c1, c2]
+                if pd.notna(val) and abs(val) > best_corr:
+                    best_corr = abs(val)
+                    best_pair = (c1, c2)
+        if best_pair:
+            c1, c2 = best_pair
+            sample = df[[c1, c2]].dropna().head(200)
+            charts.append({
+                "type": "scatter",
+                "column": f"{c1} vs {c2}",
+                "x_label": c1,
+                "y_label": c2,
+                "points": [{"x": float(x), "y": float(y)} for x, y in zip(sample[c1], sample[c2])],
+            })
+
     return charts
 
 

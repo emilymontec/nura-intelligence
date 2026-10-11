@@ -117,8 +117,8 @@ STATUS_PAGE_HTML = """<!DOCTYPE html>
     </div>
     <ul>
       <li><span>Panel de administración</span><span><a href="/admin/">/admin/</a></span></li>
-      <li><span>API — chat</span><span>/api/chat/</span></li>
-      <li><span>API — autenticación</span><span>/api/auth/</span></li>
+      <li><span>API — chat</span><span>/chat/</span></li>
+      <li><span>API — autenticación</span><span>/auth/</span></li>
       <li><span>Base de datos activa</span><span>{db_engine}</span></li>
     </ul>
   </div>

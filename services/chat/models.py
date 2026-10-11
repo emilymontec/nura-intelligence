@@ -6,9 +6,45 @@ from django.contrib.auth import get_user_model
 User = get_user_model()
 
 
+class Organization(models.Model):
+    """Módulo 1 — soporte multiusuario real (antes: 1 usuario = 1 workspace, sin jerarquías)."""
+    name = models.CharField(max_length=200)
+    owner = models.ForeignKey(User, on_delete=models.CASCADE, related_name='owned_organizations')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return self.name
+
+
+class Membership(models.Model):
+    ROLE_CHOICES = [
+        ('owner', 'Propietario'),
+        ('admin', 'Administrador'),
+        ('member', 'Miembro'),
+    ]
+    organization = models.ForeignKey(Organization, on_delete=models.CASCADE, related_name='memberships')
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='memberships')
+    role = models.CharField(max_length=20, choices=ROLE_CHOICES, default='member')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ['organization', 'user']
+        ordering = ['created_at']
+
+    def __str__(self):
+        return f"{self.user.email} @ {self.organization.name} ({self.role})"
+
+
 class Workspace(models.Model):
     name = models.CharField(max_length=200)
     owner = models.OneToOneField(User, on_delete=models.CASCADE, related_name='workspace')
+    # Un workspace personal puede opcionalmente pertenecer a una organización
+    # (colaboración de equipo); si es null, sigue siendo 100% personal.
+    organization = models.ForeignKey(Organization, on_delete=models.SET_NULL, null=True, blank=True, related_name='workspaces')
     description = models.TextField(blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -30,6 +66,10 @@ class UserProfile(models.Model):
     plan = models.CharField(max_length=100, default="free")
     daily_messages = models.IntegerField(default=0)
     last_message_date = models.DateField(blank=True, null=True)
+
+    # --- MFA (Módulo 1) ---
+    mfa_secret = models.CharField(max_length=64, blank=True, default='')
+    mfa_enabled = models.BooleanField(default=False)
 
     def __str__(self):
         return f"{self.user.email} - Profile"
@@ -74,6 +114,7 @@ class Dataset(models.Model):
     file = models.FileField(upload_to='datasets/%Y/%m/%d/')
 
     original_name = models.CharField(max_length=255)
+    source_url = models.URLField(blank=True, null=True)  # si se importó desde una API externa (Módulo 2)
     file_name = models.CharField(max_length=255)
     file_size = models.BigIntegerField()
     file_type = models.CharField(max_length=50)
@@ -159,6 +200,35 @@ class DatasetVersion(models.Model):
 
     def __str__(self):
         return f"{self.dataset.file_name} v{self.version_number}"
+
+
+class Dashboard(models.Model):
+    """
+    Módulo 4 — dashboards armables. `layout` guarda una lista ordenada de
+    widgets (KPIs o gráficos) con su configuración; el orden de la lista ES
+    la posición en la grilla, así que "drag & drop" en el frontend se
+    traduce simplemente en reordenar esta lista. Puede crearse a mano o
+    generarse automáticamente a partir del último análisis de un dataset
+    (`is_ai_generated=True`).
+
+    Forma de cada elemento de `layout`:
+        {"id": str, "kind": "kpi" | "chart", "title": str,
+         "chart_type": str (solo si kind="chart"), "source": dict}
+    """
+    workspace = models.ForeignKey(Workspace, on_delete=models.CASCADE, related_name='dashboards')
+    dataset = models.ForeignKey(Dataset, on_delete=models.SET_NULL, null=True, blank=True, related_name='dashboards')
+    name = models.CharField(max_length=200, default='Mi Dashboard')
+    layout = models.JSONField(default=list, blank=True)
+    is_ai_generated = models.BooleanField(default=False)
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-updated_at']
+
+    def __str__(self):
+        return f"{self.name} ({self.workspace.owner.email})"
 
 
 class ChatSession(models.Model):

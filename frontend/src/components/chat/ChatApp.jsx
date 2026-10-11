@@ -37,7 +37,7 @@ function ChatApp() {
   const fetchSessions = async () => {
     try {
       const headers = await getAuthHeaders();
-      const response = await fetch(`${API_BASE}/api/sessions`, { headers });
+      const response = await fetch(`${API_BASE}/sessions`, { headers });
       const data = await response.json();
       setSessions(data.sessions || []);
     } catch (error) {
@@ -57,7 +57,7 @@ function ChatApp() {
     setSessionId(id);
     try {
       const headers = await getAuthHeaders();
-      const response = await fetch(`${API_BASE}/api/sessions/${id}`, { headers });
+      const response = await fetch(`${API_BASE}/sessions/${id}`, { headers });
       const data = await response.json();
       setMessages(data.messages || []);
       setDatasetContext(data.dataset_context || null);
@@ -69,7 +69,7 @@ function ChatApp() {
   const renameSession = async (id, newTitle) => {
     try {
       const headers = await getAuthHeaders();
-      await fetch(`${API_BASE}/api/sessions/${id}/rename`, {
+      await fetch(`${API_BASE}/sessions/${id}/rename`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json', ...headers },
         body: JSON.stringify({ title: newTitle })
@@ -83,7 +83,7 @@ function ChatApp() {
   const deleteSession = async (id) => {
     try {
       const headers = await getAuthHeaders();
-      await fetch(`${API_BASE}/api/sessions/${id}/delete`, { method: 'DELETE', headers });
+      await fetch(`${API_BASE}/sessions/${id}/delete`, { method: 'DELETE', headers });
       if (id === sessionId) {
         startNewSession();
       }
@@ -100,7 +100,7 @@ function ChatApp() {
 
     try {
       const headers = await getAuthHeaders();
-      const response = await fetch(`${API_BASE}/api/chat`, {
+      const response = await fetch(`${API_BASE}/chat`, {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',
@@ -130,7 +130,7 @@ function ChatApp() {
 
     try {
       const headers = await getAuthHeaders();
-      const response = await fetch(`${API_BASE}/api/analyze`, {
+      const response = await fetch(`${API_BASE}/analyze`, {
         method: 'POST',
         headers: { ...headers },
         body: formData

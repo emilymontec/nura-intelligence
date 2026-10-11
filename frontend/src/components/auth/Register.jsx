@@ -37,7 +37,7 @@ function Register() {
       } else {
         setSuccess('¡Registro exitoso! Redirigiendo...');
         setTimeout(() => {
-          navigate('/auth/login');
+          navigate('/login');
         }, 2000);
       }
     } catch (err) {
@@ -127,7 +127,7 @@ function Register() {
 
           <div className="pt-4 flex items-center justify-center gap-4 text-xs font-mono">
             <span className="text-white/40">¿Ya tienes cuenta?</span>
-            <Link to="/auth/login" className="text-nura-purple hover:text-white transition-colors">
+            <Link to="/login" className="text-nura-purple hover:text-white transition-colors">
               Iniciar Sesión
             </Link>
           </div>

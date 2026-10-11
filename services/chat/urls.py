@@ -19,6 +19,10 @@ urlpatterns = [
     path('sessions/<str:session_id>/delete', views.delete_session, name='delete_session-no-slash'),
     path('sessions/<str:session_id>/report/pdf/', views.export_session_report_pdf, name='export_session_report_pdf'),
     path('sessions/<str:session_id>/report/pdf', views.export_session_report_pdf, name='export_session_report_pdf-no-slash'),
+    path('sessions/<str:session_id>/report/docx/', views.export_session_report_docx, name='export_session_report_docx'),
+    path('sessions/<str:session_id>/report/docx', views.export_session_report_docx, name='export_session_report_docx-no-slash'),
+    path('sessions/<str:session_id>/report/pptx/', views.export_session_report_pptx, name='export_session_report_pptx'),
+    path('sessions/<str:session_id>/report/pptx', views.export_session_report_pptx, name='export_session_report_pptx-no-slash'),
     path('profile/', views.user_profile, name='user_profile'),
     path('profile', views.user_profile, name='user_profile-no-slash'),
     path('workspace/', views.user_workspace, name='user_workspace'),
@@ -29,6 +33,12 @@ urlpatterns = [
     # Dataset endpoints
     path('datasets/', views.dataset_list_create, name='dataset_list_create'),
     path('datasets', views.dataset_list_create, name='dataset_list_create-no-slash'),
+    path('datasets/import-url/', views.dataset_import_url, name='dataset_import_url'),
+    path('datasets/import-url', views.dataset_import_url, name='dataset_import_url-no-slash'),
+    path('datasets/import-db/', views.dataset_import_db, name='dataset_import_db'),
+    path('datasets/import-db', views.dataset_import_db, name='dataset_import_db-no-slash'),
+    path('datasets/upload-chunk/', views.dataset_upload_chunk, name='dataset_upload_chunk'),
+    path('datasets/upload-chunk', views.dataset_upload_chunk, name='dataset_upload_chunk-no-slash'),
     path('datasets/<int:pk>/', views.dataset_detail, name='dataset_detail'),
     path('datasets/<int:pk>', views.dataset_detail, name='dataset_detail-no-slash'),
     path('datasets/<int:pk>/activate/', views.dataset_activate, name='dataset_activate'),
@@ -95,4 +105,38 @@ urlpatterns = [
     path('categories', views.category_list_create, name='category_list_create-no-slash'),
     path('categories/<int:pk>/', views.category_detail, name='category_detail'),
     path('categories/<int:pk>', views.category_detail, name='category_detail-no-slash'),
+
+    # Organizations & roles (Módulo 1)
+    path('organizations/', views.organization_list_create, name='organization_list_create'),
+    path('organizations', views.organization_list_create, name='organization_list_create-no-slash'),
+    path('organizations/<int:pk>/', views.organization_detail, name='organization_detail'),
+    path('organizations/<int:pk>', views.organization_detail, name='organization_detail-no-slash'),
+    path('organizations/<int:pk>/members/', views.organization_members, name='organization_members'),
+    path('organizations/<int:pk>/members', views.organization_members, name='organization_members-no-slash'),
+    path('organizations/<int:pk>/members/<int:user_id>/', views.organization_member_detail, name='organization_member_detail'),
+    path('organizations/<int:pk>/members/<int:user_id>', views.organization_member_detail, name='organization_member_detail-no-slash'),
+
+    # MFA / 2FA (Módulo 1)
+    # Este login personalizado se registra ANTES que dj_rest_auth.urls en
+    # nura/urls.py, así que Django lo usa para 'auth/login/' en vez del
+    # login por defecto — necesario para exigir el 2º factor cuando el
+    # usuario tiene MFA activado.
+    path('auth/login/', views.custom_login_view, name='custom_login'),
+    path('auth/login', views.custom_login_view, name='custom_login-no-slash'),
+    path('auth/mfa/setup/', views.mfa_setup, name='mfa_setup'),
+    path('auth/mfa/setup', views.mfa_setup, name='mfa_setup-no-slash'),
+    path('auth/mfa/enable/', views.mfa_enable, name='mfa_enable'),
+    path('auth/mfa/enable', views.mfa_enable, name='mfa_enable-no-slash'),
+    path('auth/mfa/disable/', views.mfa_disable, name='mfa_disable'),
+    path('auth/mfa/disable', views.mfa_disable, name='mfa_disable-no-slash'),
+    path('auth/mfa/verify-login/', views.mfa_verify_login, name='mfa_verify_login'),
+    path('auth/mfa/verify-login', views.mfa_verify_login, name='mfa_verify_login-no-slash'),
+
+    # Dashboards armables (Módulo 4)
+    path('dashboards/', views.dashboard_list_create, name='dashboard_list_create'),
+    path('dashboards', views.dashboard_list_create, name='dashboard_list_create-no-slash'),
+    path('dashboards/generate-ai/', views.dashboard_generate_ai, name='dashboard_generate_ai'),
+    path('dashboards/generate-ai', views.dashboard_generate_ai, name='dashboard_generate_ai-no-slash'),
+    path('dashboards/<int:pk>/', views.dashboard_detail, name='dashboard_detail'),
+    path('dashboards/<int:pk>', views.dashboard_detail, name='dashboard_detail-no-slash'),
 ]

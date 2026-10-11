@@ -1,7 +1,8 @@
 from dataclasses import dataclass
 from typing import Dict, List
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from .prompts import AGENT_SPECIALIST_PROMPT
+from .prompts import AGENT_SPECIALIST_PROMPT, AGENT_SYNTHESIS_PROMPT
 
 
 @dataclass(frozen=True)
@@ -105,3 +106,46 @@ def run_specialist_agent(agent: AgentProfile, question: str, context: str, histo
         question=question,
     )
     return llm_callback(prompt=prompt, system_message=f"Eres {agent.name} dentro del sistema multiagente.", temperature=0.25)
+
+
+def run_agent_team(agents: List[AgentProfile], question: str, context: str, history: str, industry: str,
+                    specialist_callback, synthesis_callback) -> str:
+    """
+    Orquestación multiagente real (Módulo 3). Antes de este cambio, el
+    sistema decía ser "multiagente" en los prompts pero solo corría UN
+    agente especializado por turno. Ahora, cuando el enrutador decide que
+    la pregunta amerita varias perspectivas, se ejecutan 2 agentes en
+    PARALELO (con hilos, ya que las llamadas al LLM son de red/E-S, no de
+    CPU) y sus respuestas se combinan en una sola respuesta coherente.
+    """
+    if len(agents) == 1:
+        return run_specialist_agent(agents[0], question, context, history, industry, specialist_callback)
+
+    responses = {}
+    with ThreadPoolExecutor(max_workers=len(agents)) as executor:
+        future_to_agent = {
+            executor.submit(run_specialist_agent, agent, question, context, history, industry, specialist_callback): agent
+            for agent in agents
+        }
+        for future in as_completed(future_to_agent):
+            agent = future_to_agent[future]
+            try:
+                responses[agent.key] = future.result()
+            except Exception as e:
+                responses[agent.key] = f"[{agent.name} no pudo responder: {e}]"
+
+    # Mantener el orden original (por prioridad) al presentar las respuestas al sintetizador
+    ordered_blocks = []
+    for agent in agents:
+        text = responses.get(agent.key, "")
+        if text:
+            ordered_blocks.append(f"### {agent.name} ({agent.focus})\n{text}")
+    agent_responses_block = "\n\n".join(ordered_blocks)
+
+    synthesis_prompt = AGENT_SYNTHESIS_PROMPT.format(question=question, agent_responses=agent_responses_block)
+    try:
+        return synthesis_callback(prompt=synthesis_prompt, system_message="Eres el asesor principal que combina el trabajo del equipo en una sola respuesta.", temperature=0.3)
+    except Exception:
+        # Si la síntesis falla por cualquier razón, no perdemos el trabajo ya hecho:
+        # devolvemos las respuestas del equipo concatenadas como fallback.
+        return "\n\n".join(ordered_blocks)

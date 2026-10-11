@@ -15,6 +15,18 @@ services:
       timeout: 5s
       retries: 5
 
+  # Redis: broker de Celery (Módulo 2 - procesamiento asíncrono)
+  redis:
+    image: redis:7-alpine
+    container_name: nura-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   # Microservicio de Chat (Django)
   chat-service:
     build:
@@ -27,11 +39,14 @@ services:
       - DJANGO_SECRET_KEY=unsafe-secret-key-for-dev-only-change-me
       - DJANGO_DEBUG=True
       - DATABASE_URL=postgres://nura_chat:nura_chat_password@postgres-chat:5432/nura_chat_db
+      - REDIS_URL=redis://redis:6379/0
       - GROQ_API_KEY=${GROQ_API_KEY}
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
       - CEREBRAS_API_KEY=${CEREBRAS_API_KEY}
     depends_on:
       postgres-chat:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     volumes:
       - ..:/app
@@ -40,6 +55,29 @@ services:
       sh -c "python manage.py migrate &&
              python manage.py collectstatic --noinput &&
              python manage.py runserver 0.0.0.0:8000"
+
+  # Worker de Celery: procesa el análisis de datasets en segundo plano
+  celery-worker:
+    build:
+      context: ..
+      dockerfile: Dockerfile.chat
+    container_name: nura-celery-worker
+    environment:
+      - DJANGO_SECRET_KEY=unsafe-secret-key-for-dev-only-change-me
+      - DATABASE_URL=postgres://nura_chat:nura_chat_password@postgres-chat:5432/nura_chat_db
+      - REDIS_URL=redis://redis:6379/0
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - CEREBRAS_API_KEY=${CEREBRAS_API_KEY}
+    depends_on:
+      postgres-chat:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ..:/app
+    working_dir: /app
+    command: celery -A nura worker --loglevel=info
 
   # Gateway (Nginx)
   gateway:

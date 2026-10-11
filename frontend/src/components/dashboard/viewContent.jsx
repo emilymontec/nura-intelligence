@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { useAuth } from "../../contexts/AuthContext";
 import MetricCard from "./MetricCard";
 import FileManager from "./FileManager";
+import DashboardBuilder from "./DashboardBuilder";
 import {
   LayoutDashboard,
   Database,
@@ -26,6 +27,7 @@ import {
   FileSpreadsheet,
   Lightbulb,
   FolderArchive,
+  LayoutGrid,
 } from "lucide-react";
 
 async function getAuthHeaders(refreshAccessToken) {
@@ -58,6 +60,7 @@ export const NAV_SECTIONS = [
     items: [
       { id: "chat-inteligente", icon: MessageSquareText, label: "chat_inteligente", accent: "purple" },
       { id: "reportes-ia", icon: FileText, label: "reportes_ia", accent: "purple" },
+      { id: "dashboards", icon: LayoutGrid, label: "dashboards_armables", accent: "purple" },
     ],
   },
   {
@@ -181,7 +184,7 @@ export const VIEW_CONTENT = {
         const API_BASE = import.meta.env.VITE_API_URL || '';
         try {
           const headers = await getAuthHeaders(refreshAccessToken);
-          const res = await fetch(`${API_BASE}/api/sessions/default/`, { headers });
+          const res = await fetch(`${API_BASE}/sessions/default/`, { headers });
           if (res.ok) {
             const data = await res.json();
             setContext(data.dataset_context);
@@ -249,7 +252,7 @@ export const VIEW_CONTENT = {
         if (filterType) params.append('type', filterType);
         if (filterStatus) params.append('status', filterStatus);
         
-        const response = await fetch(`${API_BASE}/api/datasets?${params}`, { headers });
+        const response = await fetch(`${API_BASE}/datasets?${params}`, { headers });
         const data = await response.json();
         setDatasets(data);
       } catch (error) {
@@ -274,7 +277,7 @@ export const VIEW_CONTENT = {
       
       try {
         const headers = await getAuthHeaders(refreshAccessToken);
-        const response = await fetch(`${API_BASE}/api/datasets`, {
+        const response = await fetch(`${API_BASE}/datasets`, {
           method: 'POST',
           headers,
           body: formData
@@ -295,7 +298,7 @@ export const VIEW_CONTENT = {
       const API_BASE = import.meta.env.VITE_API_URL || '';
       try {
         const headers = await getAuthHeaders(refreshAccessToken);
-        await fetch(`${API_BASE}/api/datasets/${id}`, {
+        await fetch(`${API_BASE}/datasets/${id}`, {
           method: 'DELETE',
           headers
         });
@@ -310,7 +313,7 @@ export const VIEW_CONTENT = {
       try {
         const headers = await getAuthHeaders(refreshAccessToken);
         headers['Content-Type'] = 'application/json';
-        await fetch(`${API_BASE}/api/datasets/${id}`, {
+        await fetch(`${API_BASE}/datasets/${id}`, {
           method: 'PUT',
           headers,
           body: JSON.stringify({ file_name: newName })
@@ -326,7 +329,7 @@ export const VIEW_CONTENT = {
       try {
         const headers = await getAuthHeaders(refreshAccessToken);
         headers['Content-Type'] = 'application/json';
-        await fetch(`${API_BASE}/api/datasets/${id}/activate`, {
+        await fetch(`${API_BASE}/datasets/${id}/activate`, {
           method: 'POST',
           headers,
           body: JSON.stringify({ session_id: 'default' })
@@ -500,7 +503,7 @@ export const VIEW_CONTENT = {
       const API_BASE = import.meta.env.VITE_API_URL || '';
       try {
         const headers = await getAuthHeaders(refreshAccessToken);
-        const response = await fetch(`${API_BASE}/api/chat`, {
+        const response = await fetch(`${API_BASE}/chat`, {
           method: 'POST',
           headers: { 
             'Content-Type': 'application/json',
@@ -569,15 +572,16 @@ export const VIEW_CONTENT = {
     const { refreshAccessToken } = useAuth();
     const [context, setContext] = useState(null);
     const [loading, setLoading] = useState(true);
-    const [exporting, setExporting] = useState(false);
+    const [exportingFormat, setExportingFormat] = useState(null); // 'pdf' | 'docx' | 'pptx' | null
     const [exportError, setExportError] = useState("");
+    const [reportAudience, setReportAudience] = useState("executive"); // 'executive' | 'technical' | 'financial'
 
     useEffect(() => {
       const fetchContext = async () => {
         const API_BASE = import.meta.env.VITE_API_URL || '';
         try {
           const headers = await getAuthHeaders(refreshAccessToken);
-          const res = await fetch(`${API_BASE}/api/sessions/default/`, { headers });
+          const res = await fetch(`${API_BASE}/sessions/default/`, { headers });
           if (res.ok) {
             const data = await res.json();
             setContext(data.dataset_context);
@@ -591,13 +595,13 @@ export const VIEW_CONTENT = {
       fetchContext();
     }, [refreshAccessToken]);
 
-    const handleExportPdf = async () => {
-      setExporting(true);
+    const handleExportReport = async (format) => {
+      setExportingFormat(format);
       setExportError("");
       const API_BASE = import.meta.env.VITE_API_URL || '';
       try {
         const headers = await getAuthHeaders(refreshAccessToken);
-        const res = await fetch(`${API_BASE}/api/sessions/default/report/pdf/`, { headers });
+        const res = await fetch(`${API_BASE}/sessions/default/report/${format}/?audience=${reportAudience}`, { headers });
         if (!res.ok) {
           const errBody = await res.json().catch(() => ({}));
           throw new Error(errBody.error || `Error ${res.status} al generar el reporte`);
@@ -606,7 +610,7 @@ export const VIEW_CONTENT = {
         const url = window.URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = `reporte_${(context?.file_name || 'dataset').replace(/\.[^/.]+$/, '')}.pdf`;
+        a.download = `reporte_${(context?.file_name || 'dataset').replace(/\.[^/.]+$/, '')}_${reportAudience}.${format}`;
         document.body.appendChild(a);
         a.click();
         a.remove();
@@ -614,7 +618,7 @@ export const VIEW_CONTENT = {
       } catch (e) {
         setExportError(e.message || "No se pudo generar el reporte.");
       } finally {
-        setExporting(false);
+        setExportingFormat(null);
       }
     };
 
@@ -689,17 +693,58 @@ export const VIEW_CONTENT = {
               <span>Exportar Reporte</span>
             </div>
             <p className="text-white/40 text-[10px] leading-relaxed">
-              Genera un informe PDF completo con resumen ejecutivo, análisis de riesgos,
+              Genera un informe completo con resumen ejecutivo, análisis de riesgos,
               oportunidades y recomendaciones basadas en IA.
             </p>
-            <button
-              onClick={handleExportPdf}
-              disabled={exporting}
-              className="w-full py-3 rounded-lg bg-nura-purple/20 border border-nura-purple/30 text-nura-purple hover:bg-nura-purple/30 transition-all text-[11px] flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              <Download className="w-4 h-4" />
-              {exporting ? "Generando PDF..." : "Exportar reporte PDF"}
-            </button>
+            <div className="space-y-1.5">
+              <span className="text-white/30 text-[10px] uppercase tracking-wide">Audiencia del reporte</span>
+              <div className="flex gap-1.5">
+                {[
+                  { key: 'executive', label: 'Ejecutivo' },
+                  { key: 'technical', label: 'Técnico' },
+                  { key: 'financial', label: 'Financiero' },
+                ].map((opt) => (
+                  <button
+                    key={opt.key}
+                    type="button"
+                    onClick={() => setReportAudience(opt.key)}
+                    className={`flex-1 py-1.5 rounded-md text-[10px] border transition-all ${
+                      reportAudience === opt.key
+                        ? "bg-nura-electric/20 border-nura-electric/40 text-nura-electric"
+                        : "bg-white/5 border-white/10 text-white/40 hover:text-white/60"
+                    }`}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="flex gap-2">
+              <button
+                onClick={() => handleExportReport('pdf')}
+                disabled={exportingFormat !== null}
+                className="flex-1 py-3 rounded-lg bg-nura-purple/20 border border-nura-purple/30 text-nura-purple hover:bg-nura-purple/30 transition-all text-[11px] flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <Download className="w-4 h-4" />
+                {exportingFormat === 'pdf' ? "Generando..." : "PDF"}
+              </button>
+              <button
+                onClick={() => handleExportReport('docx')}
+                disabled={exportingFormat !== null}
+                className="flex-1 py-3 rounded-lg bg-nura-electric/20 border border-nura-electric/30 text-nura-electric hover:bg-nura-electric/30 transition-all text-[11px] flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <FileText className="w-4 h-4" />
+                {exportingFormat === 'docx' ? "Generando..." : "Word"}
+              </button>
+              <button
+                onClick={() => handleExportReport('pptx')}
+                disabled={exportingFormat !== null}
+                className="flex-1 py-3 rounded-lg bg-amber-500/20 border border-amber-500/30 text-amber-400 hover:bg-amber-500/30 transition-all text-[11px] flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <FileText className="w-4 h-4" />
+                {exportingFormat === 'pptx' ? "Generando..." : "Slides"}
+              </button>
+            </div>
             {exportError && (
               <p className="text-red-400 text-[10px]">{exportError}</p>
             )}
@@ -708,6 +753,8 @@ export const VIEW_CONTENT = {
       </div>
     );
   },
+
+  "dashboards": DashboardBuilder,
 
   "mg-perfil": () => {
     const { user, getProfile, updateProfile, changePassword } = useAuth();

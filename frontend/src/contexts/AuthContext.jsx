@@ -3,8 +3,8 @@ import { createContext, useContext, useState, useEffect, useCallback } from 'rea
 const AuthContext = createContext();
 
 const API_BASE_URL = import.meta.env.VITE_API_URL
-  ? `${import.meta.env.VITE_API_URL.replace(/\/+$/, '')}/api`
-  : '/api';
+  ? import.meta.env.VITE_API_URL.replace(/\/+$/, '')
+  : '';
 
 const TOKEN_REFRESH_MARGIN = 5 * 60 * 1000; // 5 minutes before expiry
 
@@ -168,7 +168,13 @@ export const AuthProvider = ({ children }) => {
 
       const tokenData = await tokenResponse.json();
       if (!tokenResponse.ok) {
-        throw new Error(tokenData.detail || 'Credenciales incorrectas');
+        throw new Error(tokenData.error || tokenData.detail || 'Credenciales incorrectas');
+      }
+
+      // Si el usuario tiene MFA activado, el backend no entrega tokens
+      // todavía — hay que completar el segundo factor con verifyMfaLogin().
+      if (tokenData.mfa_required) {
+        return { mfaRequired: true, mfaToken: tokenData.mfa_token };
       }
 
       localStorage.setItem('accessToken', tokenData.access);
@@ -190,6 +196,23 @@ export const AuthProvider = ({ children }) => {
     } catch (error) {
       throw error;
     }
+  };
+
+  const verifyMfaLogin = async (mfaToken, code) => {
+    const res = await fetch(`${API_BASE_URL}/auth/mfa/verify-login/`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mfa_token: mfaToken, code }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data.error || 'Código incorrecto');
+    }
+    localStorage.setItem('accessToken', data.access);
+    localStorage.setItem('refreshToken', data.refresh);
+    storeAuthData(data.access, data.refresh, data.user);
+    scheduleRefresh(data.access);
+    return data;
   };
 
   const logout = () => {
@@ -424,6 +447,7 @@ export const AuthProvider = ({ children }) => {
         user,
         loading,
         login,
+        verifyMfaLogin,
         register,
         logout,
         resetPassword,

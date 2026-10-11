@@ -240,3 +240,18 @@ else:
 
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+
+# --- Celery (Módulo 2: procesamiento asíncrono) ---
+# Si no hay REDIS_URL configurado, las tareas corren en modo "eager"
+# (síncronas, en el mismo proceso) — así el proyecto sigue funcionando en
+# local sin necesitar Redis instalado, igual que el fallback a SQLite.
+REDIS_URL = os.getenv('REDIS_URL', '')
+CELERY_BROKER_URL = REDIS_URL or 'memory://'
+CELERY_RESULT_BACKEND = REDIS_URL or 'cache+memory://'
+CELERY_TASK_ALWAYS_EAGER = not bool(REDIS_URL)
+CELERY_TASK_EAGER_PROPAGATES = True
+CELERY_ACCEPT_CONTENT = ['json']
+CELERY_TASK_SERIALIZER = 'json'
+CELERY_RESULT_SERIALIZER = 'json'
+CELERY_TIMEZONE = TIME_ZONE if 'TIME_ZONE' in dir() else 'UTC'

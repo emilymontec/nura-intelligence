@@ -29,7 +29,7 @@ function PasswordResetConfirm() {
       await confirmResetPassword(uid, token, newPassword1, newPassword2);
       setSuccess('¡Contraseña restablecida con éxito! Redirigiendo...');
       setTimeout(() => {
-        navigate('/auth/login');
+        navigate('/login');
       }, 2000);
     } catch (err) {
       setError(err.message);
@@ -105,7 +105,7 @@ function PasswordResetConfirm() {
           )}
 
           <div className="pt-4 flex items-center justify-center gap-4 text-xs font-mono">
-            <Link to="/auth/login" className="text-white/40 hover:text-white transition-colors">
+            <Link to="/login" className="text-white/40 hover:text-white transition-colors">
               Volver a Iniciar Sesión
             </Link>
           </div>

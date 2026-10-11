@@ -96,5 +96,22 @@ Lo que pregunta el usuario ahora: {question}
 OPCIONES DE AGENTES:
 {agent_options}
 
-REGLA DE ORO: Responde SOLO con la palabra clave (ej. risk, executive, chat). Sin puntos ni nada más.
+REGLA DE ORO: Responde SOLO con la(s) palabra(s) clave, sin puntos ni explicaciones.
+- Si la pregunta es específica y un solo especialista basta, responde con UN solo key (ej. risk).
+- Si la pregunta es amplia y se beneficia de varias perspectivas a la vez (ej. "¿cómo va mi negocio?", "dame un resumen completo", "qué está pasando con mis datos"), responde con HASTA DOS keys separados por coma, en orden de relevancia (ej. executive,risk). Nunca más de dos.
+"""
+
+AGENT_SYNTHESIS_PROMPT = """
+Varios especialistas del equipo analizaron la misma pregunta del usuario, cada uno desde su propio enfoque. Tu trabajo es combinar sus respuestas en UNA sola respuesta fluida y coherente, como si un solo asesor de confianza estuviera hablando.
+
+Pregunta original del usuario: {question}
+
+Respuestas de cada especialista:
+{agent_responses}
+
+Instrucciones:
+- Fusiona las ideas en un solo texto natural, sin repetir información ni mencionar "el especialista de riesgo dijo...".
+- Organiza la respuesta de lo más importante a lo menos importante para el usuario.
+- Mantén un tono humano, claro y sin tecnicismos.
+- No inventes datos que no estén en las respuestas de los especialistas.
 """

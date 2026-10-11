@@ -44,8 +44,9 @@ export default function DashboardLayout() {
 
   return (
     <div className="bg-nura-black text-white font-sans antialiased h-screen flex overflow-hidden select-none">
-      <div className="fixed inset-0 pointer-events-none z-0 tech-grid">
-        <div className="absolute top-[-30%] right-[-10%] w-[50vw] h-[50vw] rounded-full bg-nura-electric/10 filter blur-[120px] animate-pulse-slow" />
+      <div className="fixed inset-0 pointer-events-none z-0 tech-grid overflow-hidden">
+        <div className="absolute top-[-30%] right-[-10%] w-[50vw] h-[50vw] rounded-full bg-nura-electric/10 filter blur-[120px] animate-gradient-drift" />
+        <div className="absolute bottom-[-25%] left-[5%] w-[40vw] h-[40vw] rounded-full bg-nura-purple/10 filter blur-[130px] animate-gradient-drift" style={{ animationDelay: "-11s" }} />
       </div>
 
       <SidebarNav currentView={currentView} onNavigate={handleNavigate} />

@@ -1,7 +1,7 @@
 from datetime import date
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
-from .models import UserProfile, ChatSession, ChatMessage, Workspace, Dataset, FileCategory, DatasetTag, DatasetVersion
+from .models import UserProfile, ChatSession, ChatMessage, Workspace, Dataset, FileCategory, DatasetTag, DatasetVersion, Organization, Membership, Dashboard
 from . import quotas
 
 User = get_user_model()
@@ -54,6 +54,37 @@ class ChatSessionSerializer(serializers.ModelSerializer):
     class Meta:
         model = ChatSession
         fields = ['id', 'session_id', 'title', 'created_at', 'updated_at', 'messages']
+
+
+class MembershipSerializer(serializers.ModelSerializer):
+    user_email = serializers.EmailField(source='user.email', read_only=True)
+    user_id = serializers.IntegerField(source='user.id', read_only=True)
+
+    class Meta:
+        model = Membership
+        fields = ['id', 'user_id', 'user_email', 'role', 'created_at']
+        read_only_fields = ['id', 'user_id', 'user_email', 'created_at']
+
+
+class OrganizationSerializer(serializers.ModelSerializer):
+    owner_email = serializers.EmailField(source='owner.email', read_only=True)
+    member_count = serializers.SerializerMethodField()
+    my_role = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Organization
+        fields = ['id', 'name', 'owner_email', 'member_count', 'my_role', 'created_at']
+        read_only_fields = ['id', 'owner_email', 'member_count', 'my_role', 'created_at']
+
+    def get_member_count(self, obj):
+        return obj.memberships.count()
+
+    def get_my_role(self, obj):
+        request = self.context.get('request')
+        if not request or not request.user.is_authenticated:
+            return None
+        m = obj.memberships.filter(user=request.user).first()
+        return m.role if m else None
 
 
 class WorkspaceSerializer(serializers.ModelSerializer):
@@ -124,7 +155,7 @@ class DatasetSerializer(serializers.ModelSerializer):
     class Meta:
         model = Dataset
         fields = [
-            'id', 'file', 'file_url', 'original_name', 'file_name',
+            'id', 'file', 'file_url', 'original_name', 'file_name', 'source_url',
             'file_size', 'file_type', 'file_hash', 'uploaded_at',
             'updated_at', 'uploaded_by', 'workspace', 'status',
             'validation_errors', 'analysis_context',
@@ -147,3 +178,10 @@ class DatasetSerializer(serializers.ModelSerializer):
 
     def get_latest_version(self, obj):
         return obj.versions.first().version_number if obj.versions.exists() else obj.version
+
+
+class DashboardSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Dashboard
+        fields = ['id', 'name', 'layout', 'dataset', 'is_ai_generated', 'created_by', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'created_by', 'created_at', 'updated_at']
