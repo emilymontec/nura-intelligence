@@ -231,6 +231,137 @@ class Dashboard(models.Model):
         return f"{self.name} ({self.workspace.owner.email})"
 
 
+class Trigger(models.Model):
+    """
+    Módulo 5 — triggers configurables: "cuando pase X, hacé Y" sin que el
+    usuario tenga que volver a entrar a la app. `event_type` decide qué lo
+    dispara y `action_type` qué hace al dispararse; `config` guarda los
+    parámetros específicos de cada combinación (por ejemplo, la fecha para
+    un disparador programado, o el formato/audiencia para un reporte).
+    """
+    EVENT_CHOICES = [
+        ('file_uploaded', 'Archivo nuevo subido'),
+        ('anomaly_detected', 'Anomalía detectada'),
+        ('scheduled_date', 'Fecha programada'),
+    ]
+    ACTION_CHOICES = [
+        ('analyze', 'Analizar dataset'),
+        ('notify', 'Notificar'),
+        ('generate_report', 'Generar reporte'),
+    ]
+
+    workspace = models.ForeignKey(Workspace, on_delete=models.CASCADE, related_name='triggers')
+    name = models.CharField(max_length=200)
+    event_type = models.CharField(max_length=30, choices=EVENT_CHOICES)
+    action_type = models.CharField(max_length=30, choices=ACTION_CHOICES)
+    config = models.JSONField(default=dict, blank=True)
+    active = models.BooleanField(default=True)
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    last_triggered_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.name} ({self.event_type} -> {self.action_type})"
+
+
+class TriggerLog(models.Model):
+    """Registro de cada disparo de un Trigger, para poder auditar/probar
+    que realmente se ejecutó (y con qué resultado)."""
+    trigger = models.ForeignKey(Trigger, on_delete=models.CASCADE, related_name='logs')
+    dataset = models.ForeignKey(Dataset, on_delete=models.SET_NULL, null=True, blank=True)
+    fired_at = models.DateTimeField(auto_now_add=True)
+    status = models.CharField(max_length=20, default='ok')  # 'ok' | 'error'
+    message = models.CharField(max_length=500, blank=True, default='')
+
+    class Meta:
+        ordering = ['-fired_at']
+
+    def __str__(self):
+        return f"Log de {self.trigger.name} @ {self.fired_at}"
+
+
+class SharedAccess(models.Model):
+    """
+    Módulo 5/6 — compartir un dataset o un dashboard puntual, con permiso de
+    solo lectura o edición. Se comparte con UN usuario específico
+    (`shared_with`) O con TODA una organización a la vez (`shared_with_org`,
+    soporte "multiempresa": cualquier miembro de esa organización obtiene
+    acceso, sin tener que crear una fila por persona). Exactamente uno de
+    `dataset`/`dashboard` y exactamente uno de `shared_with`/`shared_with_org`
+    debe estar seteado — se valida en la vista para dar un mensaje claro.
+    """
+    PERMISSION_CHOICES = [('view', 'Solo lectura'), ('edit', 'Edición')]
+
+    dataset = models.ForeignKey(Dataset, on_delete=models.CASCADE, null=True, blank=True, related_name='shares')
+    dashboard = models.ForeignKey(Dashboard, on_delete=models.CASCADE, null=True, blank=True, related_name='shares')
+    shared_with = models.ForeignKey(User, on_delete=models.CASCADE, null=True, blank=True, related_name='shared_with_me')
+    shared_with_org = models.ForeignKey(Organization, on_delete=models.CASCADE, null=True, blank=True, related_name='shared_items')
+    shared_by = models.ForeignKey(User, on_delete=models.CASCADE, related_name='shared_by_me')
+    permission = models.CharField(max_length=10, choices=PERMISSION_CHOICES, default='view')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        constraints = [
+            models.UniqueConstraint(fields=['dataset', 'shared_with'], name='unique_dataset_user_share'),
+            models.UniqueConstraint(fields=['dashboard', 'shared_with'], name='unique_dashboard_user_share'),
+            models.UniqueConstraint(fields=['dataset', 'shared_with_org'], name='unique_dataset_org_share'),
+            models.UniqueConstraint(fields=['dashboard', 'shared_with_org'], name='unique_dashboard_org_share'),
+        ]
+
+    def __str__(self):
+        target = self.dataset or self.dashboard
+        recipient = self.shared_with.email if self.shared_with else f"org:{self.shared_with_org.name}"
+        return f"{target} compartido con {recipient} ({self.permission})"
+
+
+class Comment(models.Model):
+    """Comentarios sobre un dataset o un dashboard (Módulo 5 — colaboración).
+    Igual que SharedAccess, exactamente uno de los dos FKs debe estar seteado."""
+    dataset = models.ForeignKey(Dataset, on_delete=models.CASCADE, null=True, blank=True, related_name='comments')
+    dashboard = models.ForeignKey(Dashboard, on_delete=models.CASCADE, null=True, blank=True, related_name='comments')
+    author = models.ForeignKey(User, on_delete=models.CASCADE, related_name='comments')
+    body = models.TextField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['created_at']
+
+    def __str__(self):
+        return f"Comentario de {self.author.email}: {self.body[:40]}"
+
+
+class Recommendation(models.Model):
+    """
+    Módulo 6 — recomendaciones proactivas generadas automáticamente al
+    analizar un dataset, independientes del flujo de chat (el usuario no
+    tiene que preguntar nada para verlas).
+    """
+    CATEGORY_CHOICES = [
+        ('riesgo', 'Riesgo'),
+        ('oportunidad', 'Oportunidad'),
+        ('eficiencia', 'Eficiencia'),
+        ('calidad_datos', 'Calidad de datos'),
+    ]
+    workspace = models.ForeignKey(Workspace, on_delete=models.CASCADE, related_name='recommendations')
+    dataset = models.ForeignKey(Dataset, on_delete=models.CASCADE, null=True, blank=True, related_name='recommendations')
+    title = models.CharField(max_length=255)
+    body = models.TextField()
+    category = models.CharField(max_length=20, choices=CATEGORY_CHOICES, default='oportunidad')
+    generated_at = models.DateTimeField(auto_now_add=True)
+    dismissed = models.BooleanField(default=False)
+
+    class Meta:
+        ordering = ['-generated_at']
+
+    def __str__(self):
+        return self.title
+
+
 class ChatSession(models.Model):
     # NOTA DE SEGURIDAD: session_id ya NO es único a nivel global. El frontend
     # usa 'default' como id inicial para todos los usuarios, por lo que un

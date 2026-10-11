@@ -1,7 +1,10 @@
 from datetime import date
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
-from .models import UserProfile, ChatSession, ChatMessage, Workspace, Dataset, FileCategory, DatasetTag, DatasetVersion, Organization, Membership, Dashboard
+from .models import (
+    UserProfile, ChatSession, ChatMessage, Workspace, Dataset, FileCategory, DatasetTag, DatasetVersion,
+    Organization, Membership, Dashboard, Trigger, TriggerLog, SharedAccess, Comment, Recommendation,
+)
 from . import quotas
 
 User = get_user_model()
@@ -185,3 +188,54 @@ class DashboardSerializer(serializers.ModelSerializer):
         model = Dashboard
         fields = ['id', 'name', 'layout', 'dataset', 'is_ai_generated', 'created_by', 'created_at', 'updated_at']
         read_only_fields = ['id', 'created_by', 'created_at', 'updated_at']
+
+
+class TriggerLogSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = TriggerLog
+        fields = ['id', 'trigger', 'dataset', 'fired_at', 'status', 'message']
+        read_only_fields = fields
+
+
+class TriggerSerializer(serializers.ModelSerializer):
+    last_logs = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Trigger
+        fields = [
+            'id', 'name', 'event_type', 'action_type', 'config', 'active',
+            'created_by', 'created_at', 'updated_at', 'last_triggered_at', 'last_logs',
+        ]
+        read_only_fields = ['id', 'created_by', 'created_at', 'updated_at', 'last_triggered_at']
+
+    def get_last_logs(self, obj):
+        return TriggerLogSerializer(obj.logs.all()[:5], many=True).data
+
+
+class SharedAccessSerializer(serializers.ModelSerializer):
+    shared_with_email = serializers.CharField(source='shared_with.email', read_only=True, default=None)
+    shared_with_org_name = serializers.CharField(source='shared_with_org.name', read_only=True, default=None)
+
+    class Meta:
+        model = SharedAccess
+        fields = [
+            'id', 'dataset', 'dashboard', 'shared_with', 'shared_with_email',
+            'shared_with_org', 'shared_with_org_name', 'shared_by', 'permission', 'created_at',
+        ]
+        read_only_fields = ['id', 'shared_by', 'created_at']
+
+
+class CommentSerializer(serializers.ModelSerializer):
+    author_email = serializers.CharField(source='author.email', read_only=True)
+
+    class Meta:
+        model = Comment
+        fields = ['id', 'dataset', 'dashboard', 'author', 'author_email', 'body', 'created_at']
+        read_only_fields = ['id', 'author', 'created_at']
+
+
+class RecommendationSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Recommendation
+        fields = ['id', 'dataset', 'title', 'body', 'category', 'generated_at', 'dismissed']
+        read_only_fields = ['id', 'generated_at']

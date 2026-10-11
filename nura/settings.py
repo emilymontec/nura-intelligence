@@ -35,6 +35,7 @@ INSTALLED_APPS = [
     'allauth.socialaccount',
     'chat',
     'corsheaders',
+    'drf_spectacular',
 ]
 
 AUTHENTICATION_BACKENDS = [
@@ -51,6 +52,17 @@ REST_FRAMEWORK = {
     'DEFAULT_PERMISSION_CLASSES': (
         'rest_framework.permissions.IsAuthenticatedOrReadOnly',
     ),
+    # Módulo 6 — API pública documentada. drf-spectacular ya estaba en
+    # requirements.txt pero no estaba wireado: no había ni el generador de
+    # schema ni una URL de Swagger/Redoc en todo el proyecto.
+    'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
+}
+
+SPECTACULAR_SETTINGS = {
+    'TITLE': 'Nura Intelligence API',
+    'DESCRIPTION': 'API pública de Nura Intelligence — plataforma de Business Intelligence conversacional.',
+    'VERSION': '1.0.0',
+    'SERVE_INCLUDE_SCHEMA': False,
 }
 
 REST_AUTH = {
@@ -247,6 +259,30 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 # (síncronas, en el mismo proceso) — así el proyecto sigue funcionando en
 # local sin necesitar Redis instalado, igual que el fallback a SQLite.
 REDIS_URL = os.getenv('REDIS_URL', '')
+
+# Módulo 6 — caché. Mismo patrón de fallback que la BD y Celery: si hay
+# REDIS_URL configurado se usa Redis de verdad (clave requerida para que
+# el caché sea compartido entre varios workers/procesos en producción);
+# si no, cae a un caché en memoria del propio proceso, para que el
+# proyecto siga corriendo en local sin pedir infraestructura extra. Un
+# caché en memoria por proceso no es apto para producción con varios
+# workers (cada uno tendría su propia copia), por eso es explícitamente
+# un fallback de desarrollo, igual que el modo eager de Celery.
+if REDIS_URL:
+    CACHES = {
+        'default': {
+            'BACKEND': 'django.core.cache.backends.redis.RedisCache',
+            'LOCATION': REDIS_URL,
+        }
+    }
+else:
+    CACHES = {
+        'default': {
+            'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+            'LOCATION': 'nura-local-cache',
+        }
+    }
+
 CELERY_BROKER_URL = REDIS_URL or 'memory://'
 CELERY_RESULT_BACKEND = REDIS_URL or 'cache+memory://'
 CELERY_TASK_ALWAYS_EAGER = not bool(REDIS_URL)

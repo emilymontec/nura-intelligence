@@ -35,6 +35,8 @@ urlpatterns = [
     path('datasets', views.dataset_list_create, name='dataset_list_create-no-slash'),
     path('datasets/import-url/', views.dataset_import_url, name='dataset_import_url'),
     path('datasets/import-url', views.dataset_import_url, name='dataset_import_url-no-slash'),
+    path('datasets/import-graphql/', views.dataset_import_graphql, name='dataset_import_graphql'),
+    path('datasets/import-graphql', views.dataset_import_graphql, name='dataset_import_graphql-no-slash'),
     path('datasets/import-db/', views.dataset_import_db, name='dataset_import_db'),
     path('datasets/import-db', views.dataset_import_db, name='dataset_import_db-no-slash'),
     path('datasets/upload-chunk/', views.dataset_upload_chunk, name='dataset_upload_chunk'),
@@ -85,6 +87,8 @@ urlpatterns = [
     path('datasets/<int:pk>/statistics', views.dataset_statistics, name='dataset_statistics-no-slash'),
     path('datasets/<int:pk>/search/', views.dataset_search, name='dataset_search'),
     path('datasets/<int:pk>/search', views.dataset_search, name='dataset_search-no-slash'),
+    path('datasets/<int:pk>/what-if/', views.dataset_what_if, name='dataset_what_if'),
+    path('datasets/<int:pk>/what-if', views.dataset_what_if, name='dataset_what_if-no-slash'),
     path('datasets/<int:pk>/filter/', views.dataset_filter, name='dataset_filter'),
     path('datasets/<int:pk>/filter', views.dataset_filter, name='dataset_filter-no-slash'),
 
@@ -139,4 +143,42 @@ urlpatterns = [
     path('dashboards/generate-ai', views.dashboard_generate_ai, name='dashboard_generate_ai-no-slash'),
     path('dashboards/<int:pk>/', views.dashboard_detail, name='dashboard_detail'),
     path('dashboards/<int:pk>', views.dashboard_detail, name='dashboard_detail-no-slash'),
+
+    # Triggers configurables (Módulo 5)
+    path('triggers/', views.trigger_list_create, name='trigger_list_create'),
+    path('triggers', views.trigger_list_create, name='trigger_list_create-no-slash'),
+    path('triggers/check-scheduled/', views.trigger_check_scheduled, name='trigger_check_scheduled'),
+    path('triggers/check-scheduled', views.trigger_check_scheduled, name='trigger_check_scheduled-no-slash'),
+    path('triggers/<int:pk>/', views.trigger_detail, name='trigger_detail'),
+    path('triggers/<int:pk>', views.trigger_detail, name='trigger_detail-no-slash'),
+
+    # Compartir (Módulo 5)
+    path('shares/', views.share_list, name='share_list'),
+    path('shares', views.share_list, name='share_list-no-slash'),
+    path('shares/create/', views.share_create, name='share_create'),
+    path('shares/create', views.share_create, name='share_create-no-slash'),
+    path('shares/<int:pk>/', views.share_revoke, name='share_revoke'),
+    path('shares/<int:pk>', views.share_revoke, name='share_revoke-no-slash'),
+    path('datasets/shared-with-me/', views.shared_datasets_list, name='shared_datasets_list'),
+    path('datasets/shared-with-me', views.shared_datasets_list, name='shared_datasets_list-no-slash'),
+    path('dashboards/shared-with-me/', views.shared_dashboards_list, name='shared_dashboards_list'),
+    path('dashboards/shared-with-me', views.shared_dashboards_list, name='shared_dashboards_list-no-slash'),
+
+    # Comentarios (Módulo 5)
+    path('comments/', views.comment_list_create, name='comment_list_create'),
+    path('comments', views.comment_list_create, name='comment_list_create-no-slash'),
+    path('comments/<int:pk>/', views.comment_delete, name='comment_delete'),
+    path('comments/<int:pk>', views.comment_delete, name='comment_delete-no-slash'),
+
+    # Agentes por área de negocio (Módulo 6)
+    path('agents/by-area/', views.agents_by_area, name='agents_by_area'),
+    path('agents/by-area', views.agents_by_area, name='agents_by_area-no-slash'),
+
+    # Recomendaciones proactivas (Módulo 6)
+    path('recommendations/', views.recommendation_list, name='recommendation_list'),
+    path('recommendations', views.recommendation_list, name='recommendation_list-no-slash'),
+    path('recommendations/<int:pk>/dismiss/', views.recommendation_dismiss, name='recommendation_dismiss'),
+    path('recommendations/<int:pk>/dismiss', views.recommendation_dismiss, name='recommendation_dismiss-no-slash'),
+    path('datasets/<int:pk>/generate-recommendations/', views.dataset_generate_recommendations, name='dataset_generate_recommendations'),
+    path('datasets/<int:pk>/generate-recommendations', views.dataset_generate_recommendations, name='dataset_generate_recommendations-no-slash'),
 ]

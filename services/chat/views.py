@@ -23,8 +23,15 @@ from rest_framework import status
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from .models import ChatSession, ChatMessage, UserProfile, Workspace, Dataset, FileCategory, DatasetTag, DatasetVersion, Organization, Membership, Dashboard
-from .serializers import UserProfileSerializer, UserSerializer, WorkspaceSerializer, DatasetSerializer, FileCategorySerializer, DatasetTagSerializer, DatasetVersionSerializer, OrganizationSerializer, MembershipSerializer, DashboardSerializer
+from .models import (
+    ChatSession, ChatMessage, UserProfile, Workspace, Dataset, FileCategory, DatasetTag, DatasetVersion,
+    Organization, Membership, Dashboard, Trigger, TriggerLog, SharedAccess, Comment, Recommendation,
+)
+from .serializers import (
+    UserProfileSerializer, UserSerializer, WorkspaceSerializer, DatasetSerializer, FileCategorySerializer,
+    DatasetTagSerializer, DatasetVersionSerializer, OrganizationSerializer, MembershipSerializer, DashboardSerializer,
+    TriggerSerializer, TriggerLogSerializer, SharedAccessSerializer, CommentSerializer, RecommendationSerializer,
+)
 from . import quotas
 from . import reports
 from .tasks import analyze_dataset_task
@@ -32,7 +39,7 @@ from analytics.analyzer import (
     load_csv, prepare_dataframe, dataset_summary, column_info, evaluate_business,
     analyze_numeric_trends, compute_correlations, detect_industry,
     get_business_context, detect_critical_variables, detect_anomalies,
-    check_fraud_signals, simple_forecast, get_chart_data, get_preview, get_kpis,
+    check_fraud_signals, simple_forecast, what_if_simulation, get_chart_data, get_preview, get_kpis,
     search_records, filter_records, _json_to_dataframe
 )
 from analytics.utils import make_json_safe
@@ -631,10 +638,18 @@ def export_session_report_pptx(request, session_id):
 @permission_classes([IsAuthenticated])
 def workspace_usage(request):
     """Uso actual vs límites del plan: almacenamiento, datasets y mensajes/día."""
+    from . import caching
+
     workspace, _ = Workspace.objects.get_or_create(
         owner=request.user, defaults={'name': f"Espacio de trabajo de {request.user.email}"}
     )
-    return Response(quotas.workspace_usage_summary(workspace))
+    cached = caching.get_cached_workspace_usage(workspace.id)
+    if cached is not None:
+        return Response(cached)
+
+    data = quotas.workspace_usage_summary(workspace)
+    caching.set_cached_workspace_usage(workspace.id, data)
+    return Response(data)
 
 
 # Dataset Endpoints
@@ -683,6 +698,10 @@ def create_dataset_from_django_file(user, workspace, django_file):
     except IntegrityError:
         return Response({"error": "Ya existe un archivo idéntico en tu workspace"}, status=status.HTTP_409_CONFLICT)
 
+    from . import triggers as triggers_module, caching as caching_module
+    triggers_module.fire_triggers(workspace, 'file_uploaded', dataset=dataset)
+    caching_module.invalidate_workspace_caches(workspace.id)
+
     if is_valid and file_type in ['csv', 'xlsx', 'json']:
         dataset.status = 'processing'
         dataset.save(update_fields=['status'])
@@ -692,41 +711,150 @@ def create_dataset_from_django_file(user, workspace, django_file):
     return Response(DatasetSerializer(dataset).data, status=status.HTTP_201_CREATED)
 
 
+def _build_safe_headers(raw_headers):
+    """Valida y limpia el dict de headers que manda el usuario para una
+    integración REST/GraphQL de terceros (Módulo 5). Cap de cantidad y
+    tamaño para no habilitar abuso, nada más — el usuario es dueño de la
+    API externa a la que apunta, así que el header en sí (p. ej. un token
+    Bearer) es su responsabilidad."""
+    if not raw_headers:
+        return {}, None
+    if not isinstance(raw_headers, dict):
+        return None, "'headers' debe ser un objeto {nombre: valor}"
+    if len(raw_headers) > 10:
+        return None, "Máximo 10 headers por integración"
+    cleaned = {}
+    for k, v in raw_headers.items():
+        key, val = str(k)[:100], str(v)[:1000]
+        if "\n" in key or "\r" in key or "\n" in val or "\r" in val:
+            return None, "Los headers no pueden contener saltos de línea"
+        cleaned[key] = val
+    return cleaned, None
+
+
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def dataset_import_url(request):
     """
-    Módulo 2 — carga de datos desde fuentes externas (APIs).
+    Módulo 2/5 — carga de datos desde fuentes externas (APIs REST).
     Descarga un JSON desde una URL y lo convierte en un dataset, igual que
     si se hubiera subido un archivo .json manualmente. Reutiliza el mismo
     parser tolerante (_json_to_dataframe) construido para el soporte JSON.
+    Soporta headers propios (p. ej. 'Authorization: Bearer ...') y método
+    GET/POST con body JSON, para integrarse con APIs REST de terceros que
+    requieren autenticación — no solo endpoints públicos.
     """
     import requests as req_lib
     from django.core.files.base import ContentFile
 
     url = (request.data.get('url') or '').strip()
     name = (request.data.get('name') or '').strip()
+    method = (request.data.get('method') or 'GET').strip().upper()
+    body = request.data.get('body')
     if not url:
         return Response({"error": "Se requiere una URL"}, status=status.HTTP_400_BAD_REQUEST)
     if not (url.startswith('http://') or url.startswith('https://')):
         return Response({"error": "La URL debe empezar con http:// o https://"}, status=status.HTTP_400_BAD_REQUEST)
+    if method not in ('GET', 'POST'):
+        return Response({"error": "method debe ser GET o POST"}, status=status.HTTP_400_BAD_REQUEST)
+
+    extra_headers, err = _build_safe_headers(request.data.get('headers'))
+    if err:
+        return Response({"error": err}, status=status.HTTP_400_BAD_REQUEST)
 
     workspace, _ = Workspace.objects.get_or_create(owner=request.user)
 
+    headers = {"User-Agent": "Nura-Intelligence/1.0", **extra_headers}
     try:
-        resp = req_lib.get(url, timeout=15, headers={"User-Agent": "Nura-Intelligence/1.0"})
+        if method == 'POST':
+            resp = req_lib.post(url, json=body if isinstance(body, dict) else None, timeout=15, headers=headers)
+        else:
+            resp = req_lib.get(url, timeout=15, headers=headers)
         resp.raise_for_status()
     except req_lib.RequestException as e:
         return Response({"error": f"No se pudo descargar la URL: {e}"}, status=status.HTTP_400_BAD_REQUEST)
 
     try:
         raw = resp.json()
+        data_path = (request.data.get('data_path') or '').strip()
+        if data_path:
+            for key in data_path.split('.'):
+                raw = raw[key] if isinstance(raw, dict) else raw[int(key)]
         df = _json_to_dataframe(raw)
     except Exception as e:
         return Response({"error": f"La URL no devolvió un JSON tabular válido: {e}"}, status=status.HTTP_400_BAD_REQUEST)
 
     csv_bytes = df.to_csv(index=False).encode('utf-8')
     file_name = f"{name or 'import_url'}.csv"
+    django_file = ContentFile(csv_bytes, name=file_name)
+    django_file.size = len(csv_bytes)
+
+    response = create_dataset_from_django_file(request.user, workspace, django_file)
+    if response.status_code == status.HTTP_201_CREATED:
+        Dataset.objects.filter(pk=response.data['id']).update(source_url=url)
+        response.data['source_url'] = url
+    return response
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def dataset_import_graphql(request):
+    """
+    Módulo 5 — carga de datos desde una API **GraphQL** de terceros.
+    Manda {query, variables} por POST al endpoint indicado, toma la
+    respuesta bajo `data` (o el sub-camino que indique `data_path`, p. ej.
+    "data.users") y la convierte en dataset con el mismo parser tolerante
+    de JSON. Las APIs GraphQL casi siempre requieren autenticación, por eso
+    acepta los mismos `headers` configurables que la integración REST.
+    """
+    import requests as req_lib
+    from django.core.files.base import ContentFile
+
+    url = (request.data.get('url') or '').strip()
+    query = (request.data.get('query') or '').strip()
+    variables = request.data.get('variables') or {}
+    name = (request.data.get('name') or '').strip()
+    data_path = (request.data.get('data_path') or '').strip()
+
+    if not url or not query:
+        return Response({"error": "Se requieren 'url' y 'query'"}, status=status.HTTP_400_BAD_REQUEST)
+    if not (url.startswith('http://') or url.startswith('https://')):
+        return Response({"error": "La URL debe empezar con http:// o https://"}, status=status.HTTP_400_BAD_REQUEST)
+    if not isinstance(variables, dict):
+        return Response({"error": "'variables' debe ser un objeto"}, status=status.HTTP_400_BAD_REQUEST)
+
+    extra_headers, err = _build_safe_headers(request.data.get('headers'))
+    if err:
+        return Response({"error": err}, status=status.HTTP_400_BAD_REQUEST)
+
+    workspace, _ = Workspace.objects.get_or_create(owner=request.user)
+    headers = {"User-Agent": "Nura-Intelligence/1.0", "Content-Type": "application/json", **extra_headers}
+
+    try:
+        resp = req_lib.post(url, json={"query": query, "variables": variables}, timeout=15, headers=headers)
+        resp.raise_for_status()
+    except req_lib.RequestException as e:
+        return Response({"error": f"No se pudo consultar la API GraphQL: {e}"}, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        payload = resp.json()
+    except Exception as e:
+        return Response({"error": f"La respuesta no es JSON válido: {e}"}, status=status.HTTP_400_BAD_REQUEST)
+
+    if payload.get('errors'):
+        return Response({"error": f"La API GraphQL devolvió errores: {payload['errors']}"}, status=status.HTTP_400_BAD_REQUEST)
+
+    raw = payload.get('data', payload)
+    try:
+        if data_path:
+            for key in data_path.split('.'):
+                raw = raw[key] if isinstance(raw, dict) else raw[int(key)]
+        df = _json_to_dataframe(raw)
+    except Exception as e:
+        return Response({"error": f"No se pudo convertir la respuesta en una tabla: {e}"}, status=status.HTTP_400_BAD_REQUEST)
+
+    csv_bytes = df.to_csv(index=False).encode('utf-8')
+    file_name = f"{name or 'import_graphql'}.csv"
     django_file = ContentFile(csv_bytes, name=file_name)
     django_file.size = len(csv_bytes)
 
@@ -951,7 +1079,11 @@ def dataset_list_create(request):
                 {"error": f"Error al guardar el archivo: {str(e)}"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
-        
+
+        from . import triggers as triggers_module, caching as caching_module
+        triggers_module.fire_triggers(workspace, 'file_uploaded', dataset=dataset)
+        caching_module.invalidate_workspace_caches(workspace.id)
+
         # Análisis asíncrono vía Celery (Módulo 2). Antes: el análisis
         # corría síncrono aquí mismo, bloqueando la respuesta HTTP hasta
         # terminar de leer/limpiar/analizar el archivo completo. Sin Redis
@@ -1008,6 +1140,8 @@ def dataset_detail(request, pk):
         if dataset.file:
             dataset.file.delete(save=False)
         dataset.delete()
+        from . import caching as caching_module
+        caching_module.invalidate_workspace_caches(workspace.id)
         return Response({"status": "ok", "message": "Dataset eliminado correctamente"}, status=status.HTTP_204_NO_CONTENT)
 
 
@@ -1063,6 +1197,8 @@ def dataset_bulk_delete(request):
         if ds.file:
             ds.file.delete(save=False)
     datasets.delete()
+    from . import caching as caching_module
+    caching_module.invalidate_workspace_caches(workspace.id)
     return Response({"status": "ok", "deleted": count})
 
 
@@ -1106,7 +1242,14 @@ def dataset_toggle_star(request, pk):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def dataset_stats(request):
+    from . import caching
+
     workspace, _ = Workspace.objects.get_or_create(owner=request.user)
+
+    cached = caching.get_cached_dataset_stats(workspace.id)
+    if cached is not None:
+        return Response(cached)
+
     datasets = Dataset.objects.filter(workspace=workspace)
 
     total = datasets.count()
@@ -1121,13 +1264,15 @@ def dataset_stats(request):
     total_size = sum(ds.file_size for ds in datasets)
     starred = datasets.filter(starred=True).count()
 
-    return Response({
+    data = {
         "total": total,
         "by_type": by_type,
         "by_status": by_status,
         "total_size": total_size,
         "starred": starred,
-    })
+    }
+    caching.set_cached_dataset_stats(workspace.id, data)
+    return Response(data)
 
 
 @api_view(['GET', 'POST', 'DELETE'])
@@ -2049,3 +2194,388 @@ def dashboard_generate_ai(request):
         )
 
     return Response(DashboardSerializer(dashboard).data, status=status.HTTP_201_CREATED)
+
+
+# ---------------------------------------------------------------------------
+# Triggers configurables (Módulo 5)
+# ---------------------------------------------------------------------------
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated])
+def trigger_list_create(request):
+    workspace, _ = Workspace.objects.get_or_create(owner=request.user)
+
+    if request.method == 'GET':
+        return Response(TriggerSerializer(Trigger.objects.filter(workspace=workspace), many=True).data)
+
+    name = (request.data.get('name') or '').strip()
+    event_type = request.data.get('event_type')
+    action_type = request.data.get('action_type')
+    config = request.data.get('config', {})
+
+    if not name or not event_type or not action_type:
+        return Response({"error": "Se requieren 'name', 'event_type' y 'action_type'"}, status=status.HTTP_400_BAD_REQUEST)
+    if event_type not in dict(Trigger.EVENT_CHOICES):
+        return Response({"error": f"event_type inválido. Opciones: {list(dict(Trigger.EVENT_CHOICES))}"}, status=status.HTTP_400_BAD_REQUEST)
+    if action_type not in dict(Trigger.ACTION_CHOICES):
+        return Response({"error": f"action_type inválido. Opciones: {list(dict(Trigger.ACTION_CHOICES))}"}, status=status.HTTP_400_BAD_REQUEST)
+    if event_type == 'scheduled_date' and not (config or {}).get('scheduled_at'):
+        return Response({"error": "Un trigger de 'scheduled_date' requiere config.scheduled_at (ISO 8601)"}, status=status.HTTP_400_BAD_REQUEST)
+
+    trigger = Trigger.objects.create(
+        workspace=workspace, name=name, event_type=event_type, action_type=action_type,
+        config=config, created_by=request.user,
+    )
+    return Response(TriggerSerializer(trigger).data, status=status.HTTP_201_CREATED)
+
+
+@api_view(['GET', 'PATCH', 'DELETE'])
+@permission_classes([IsAuthenticated])
+def trigger_detail(request, pk):
+    workspace, _ = Workspace.objects.get_or_create(owner=request.user)
+    try:
+        trigger = Trigger.objects.get(pk=pk, workspace=workspace)
+    except Trigger.DoesNotExist:
+        return Response({"error": "Trigger no encontrado"}, status=status.HTTP_404_NOT_FOUND)
+
+    if request.method == 'GET':
+        return Response(TriggerSerializer(trigger).data)
+    if request.method == 'DELETE':
+        trigger.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    for field in ['name', 'event_type', 'action_type', 'config', 'active']:
+        if field in request.data:
+            setattr(trigger, field, request.data[field])
+    trigger.save()
+    return Response(TriggerSerializer(trigger).data)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def trigger_check_scheduled(request):
+    """
+    Evalúa los triggers de tipo 'scheduled_date' del workspace del usuario:
+    si `config.scheduled_at` ya pasó y todavía no se disparó
+    (`last_triggered_at` vacío), lo ejecuta. No hay Celery Beat configurado
+    en este proyecto, así que este endpoint es lo que un scheduler externo
+    (cron, un worker periódico) llamaría; se puede invocar a mano para
+    simular ese paso, y así queda probado sin depender de infraestructura
+    de scheduling adicional.
+    """
+    from django.utils import timezone
+    from django.utils.dateparse import parse_datetime
+    from . import triggers as triggers_module
+
+    workspace, _ = Workspace.objects.get_or_create(owner=request.user)
+    now = timezone.now()
+    fired = []
+
+    pending = Trigger.objects.filter(workspace=workspace, event_type='scheduled_date', active=True, last_triggered_at__isnull=True)
+    for trigger in pending:
+        scheduled_at_raw = (trigger.config or {}).get('scheduled_at')
+        scheduled_at = parse_datetime(scheduled_at_raw) if scheduled_at_raw else None
+        if scheduled_at and scheduled_at <= now:
+            dataset_id = (trigger.config or {}).get('dataset_id')
+            dataset = Dataset.objects.filter(pk=dataset_id, workspace=workspace).first() if dataset_id else None
+            logs = triggers_module.fire_triggers(workspace, 'scheduled_date', dataset=dataset)
+            # fire_triggers dispara TODOS los triggers activos de este event_type;
+            # acá solo nos interesa reportar si este trigger puntual corrió.
+            fired.append(trigger.id)
+
+    return Response({"fired_trigger_ids": fired, "checked_at": now.isoformat()})
+
+
+# ---------------------------------------------------------------------------
+# Compartir (Módulo 5) — datasets y dashboards, por usuario o por organización
+# ---------------------------------------------------------------------------
+
+def _validate_share_target(data):
+    dataset_id = data.get('dataset_id')
+    dashboard_id = data.get('dashboard_id')
+    if bool(dataset_id) == bool(dashboard_id):
+        return None, None, "Se requiere exactamente uno de 'dataset_id' o 'dashboard_id'"
+    return dataset_id, dashboard_id, None
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def share_create(request):
+    """
+    Comparte un dataset o un dashboard propio con otro usuario (por email)
+    o con toda una organización a la vez. El que comparte debe ser dueño
+    del recurso (está en su propio workspace).
+    """
+    workspace, _ = Workspace.objects.get_or_create(owner=request.user)
+    dataset_id, dashboard_id, err = _validate_share_target(request.data)
+    if err:
+        return Response({"error": err}, status=status.HTTP_400_BAD_REQUEST)
+
+    permission = request.data.get('permission', 'view')
+    if permission not in dict(SharedAccess.PERMISSION_CHOICES):
+        return Response({"error": "permission debe ser 'view' o 'edit'"}, status=status.HTTP_400_BAD_REQUEST)
+
+    dataset = dashboard = None
+    if dataset_id:
+        dataset = Dataset.objects.filter(pk=dataset_id, workspace=workspace).first()
+        if not dataset:
+            return Response({"error": "Dataset no encontrado en tu workspace"}, status=status.HTTP_404_NOT_FOUND)
+    else:
+        dashboard = Dashboard.objects.filter(pk=dashboard_id, workspace=workspace).first()
+        if not dashboard:
+            return Response({"error": "Dashboard no encontrado en tu workspace"}, status=status.HTTP_404_NOT_FOUND)
+
+    target_email = (request.data.get('email') or '').strip().lower()
+    org_id = request.data.get('organization_id')
+    if bool(target_email) == bool(org_id):
+        return Response({"error": "Se requiere exactamente uno de 'email' u 'organization_id'"}, status=status.HTTP_400_BAD_REQUEST)
+
+    shared_with = shared_with_org = None
+    if target_email:
+        shared_with = get_user_model().objects.filter(email__iexact=target_email).first()
+        if not shared_with:
+            return Response({"error": "No existe un usuario con ese email"}, status=status.HTTP_404_NOT_FOUND)
+        if shared_with.id == request.user.id:
+            return Response({"error": "No podés compartir un recurso con vos mismo"}, status=status.HTTP_400_BAD_REQUEST)
+    else:
+        shared_with_org = Organization.objects.filter(
+            pk=org_id, memberships__user=request.user
+        ).first()
+        if not shared_with_org:
+            return Response({"error": "No pertenecés a esa organización"}, status=status.HTTP_404_NOT_FOUND)
+
+    try:
+        share = SharedAccess.objects.create(
+            dataset=dataset, dashboard=dashboard, shared_with=shared_with,
+            shared_with_org=shared_with_org, shared_by=request.user, permission=permission,
+        )
+    except IntegrityError:
+        return Response({"error": "Ya está compartido con ese destinatario"}, status=status.HTTP_409_CONFLICT)
+
+    return Response(SharedAccessSerializer(share).data, status=status.HTTP_201_CREATED)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def share_list(request):
+    """Lista lo que el usuario compartió y lo que otros compartieron con él
+    (directamente o a través de una organización a la que pertenece)."""
+    my_org_ids = Organization.objects.filter(memberships__user=request.user).values_list('id', flat=True)
+    shared_by_me = SharedAccess.objects.filter(shared_by=request.user)
+    shared_with_me = SharedAccess.objects.filter(
+        Q(shared_with=request.user) | Q(shared_with_org_id__in=my_org_ids)
+    ).exclude(shared_by=request.user)
+    return Response({
+        "shared_by_me": SharedAccessSerializer(shared_by_me, many=True).data,
+        "shared_with_me": SharedAccessSerializer(shared_with_me, many=True).data,
+    })
+
+
+@api_view(['DELETE'])
+@permission_classes([IsAuthenticated])
+def share_revoke(request, pk):
+    share = SharedAccess.objects.filter(pk=pk, shared_by=request.user).first()
+    if not share:
+        return Response({"error": "No encontrado"}, status=status.HTTP_404_NOT_FOUND)
+    share.delete()
+    return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+def _accessible_dataset_ids(user):
+    """IDs de datasets propios + compartidos con el usuario (directo u org)."""
+    my_org_ids = Organization.objects.filter(memberships__user=user).values_list('id', flat=True)
+    shared_ids = SharedAccess.objects.filter(
+        Q(shared_with=user) | Q(shared_with_org_id__in=my_org_ids)
+    ).exclude(dataset__isnull=True).values_list('dataset_id', flat=True)
+    return list(shared_ids)
+
+
+def _accessible_dashboard_ids(user):
+    my_org_ids = Organization.objects.filter(memberships__user=user).values_list('id', flat=True)
+    shared_ids = SharedAccess.objects.filter(
+        Q(shared_with=user) | Q(shared_with_org_id__in=my_org_ids)
+    ).exclude(dashboard__isnull=True).values_list('dashboard_id', flat=True)
+    return list(shared_ids)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def shared_datasets_list(request):
+    """Datasets que OTROS compartieron con el usuario (no los propios)."""
+    ids = _accessible_dataset_ids(request.user)
+    datasets = Dataset.objects.filter(id__in=ids)
+    return Response(DatasetSerializer(datasets, many=True).data)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def shared_dashboards_list(request):
+    """Dashboards que OTROS compartieron con el usuario (no los propios)."""
+    ids = _accessible_dashboard_ids(request.user)
+    dashboards = Dashboard.objects.filter(id__in=ids)
+    return Response(DashboardSerializer(dashboards, many=True).data)
+
+
+# ---------------------------------------------------------------------------
+# Comentarios (Módulo 5)
+# ---------------------------------------------------------------------------
+
+def _user_can_access_dataset(user, dataset):
+    if dataset.workspace.owner_id == user.id:
+        return True
+    return dataset.id in _accessible_dataset_ids(user)
+
+
+def _user_can_access_dashboard(user, dashboard):
+    if dashboard.workspace.owner_id == user.id:
+        return True
+    return dashboard.id in _accessible_dashboard_ids(user)
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated])
+def comment_list_create(request):
+    dataset_id = request.query_params.get('dataset_id') or request.data.get('dataset_id')
+    dashboard_id = request.query_params.get('dashboard_id') or request.data.get('dashboard_id')
+    if bool(dataset_id) == bool(dashboard_id):
+        return Response({"error": "Se requiere exactamente uno de 'dataset_id' o 'dashboard_id'"}, status=status.HTTP_400_BAD_REQUEST)
+
+    dataset = dashboard = None
+    if dataset_id:
+        dataset = Dataset.objects.filter(pk=dataset_id).first()
+        if not dataset or not _user_can_access_dataset(request.user, dataset):
+            return Response({"error": "Dataset no encontrado o sin acceso"}, status=status.HTTP_404_NOT_FOUND)
+    else:
+        dashboard = Dashboard.objects.filter(pk=dashboard_id).first()
+        if not dashboard or not _user_can_access_dashboard(request.user, dashboard):
+            return Response({"error": "Dashboard no encontrado o sin acceso"}, status=status.HTTP_404_NOT_FOUND)
+
+    if request.method == 'GET':
+        comments = Comment.objects.filter(dataset=dataset) if dataset else Comment.objects.filter(dashboard=dashboard)
+        return Response(CommentSerializer(comments, many=True).data)
+
+    body = (request.data.get('body') or '').strip()
+    if not body:
+        return Response({"error": "El comentario no puede estar vacío"}, status=status.HTTP_400_BAD_REQUEST)
+    comment = Comment.objects.create(dataset=dataset, dashboard=dashboard, author=request.user, body=body)
+    return Response(CommentSerializer(comment).data, status=status.HTTP_201_CREATED)
+
+
+@api_view(['DELETE'])
+@permission_classes([IsAuthenticated])
+def comment_delete(request, pk):
+    comment = Comment.objects.filter(pk=pk, author=request.user).first()
+    if not comment:
+        return Response({"error": "No encontrado"}, status=status.HTTP_404_NOT_FOUND)
+    comment.delete()
+    return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+# ---------------------------------------------------------------------------
+# Agentes por área de negocio (Módulo 6)
+# ---------------------------------------------------------------------------
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def agents_by_area(request):
+    """Expone el registro de agentes especializados agrupado por área de
+    negocio (finanzas/ventas/marketing/operaciones/general), para que el
+    frontend pueda mostrar "elegí un área" en vez de una lista plana."""
+    from ai.agents import get_agents_by_business_area
+
+    grouped = get_agents_by_business_area()
+    return Response({
+        area: [
+            {"key": a.key, "name": a.name, "focus": a.focus, "priority": a.priority}
+            for a in agents
+        ]
+        for area, agents in grouped.items()
+    })
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def dataset_what_if(request, pk):
+    """
+    Módulo 6 — simulaciones "qué pasa si...". Body:
+        {"target_col": "ventas", "periods": 3, "scenarios": [
+            {"name": "Crecer 20% más rápido", "growth_adjustment_pct": 20},
+            {"name": "Bajar el precio 10%", "variable": "precio", "change_pct": -10}
+        ]}
+    """
+    workspace, _ = Workspace.objects.get_or_create(owner=request.user)
+    try:
+        dataset = Dataset.objects.get(pk=pk, workspace=workspace)
+    except Dataset.DoesNotExist:
+        return Response({"error": "Dataset no encontrado"}, status=status.HTTP_404_NOT_FOUND)
+
+    target_col = request.data.get('target_col')
+    periods = int(request.data.get('periods', 3))
+    scenarios = request.data.get('scenarios', [])
+
+    if not target_col:
+        return Response({"error": "Se requiere 'target_col'"}, status=status.HTTP_400_BAD_REQUEST)
+    if not isinstance(scenarios, list) or not scenarios:
+        return Response({"error": "Se requiere al menos un escenario en 'scenarios'"}, status=status.HTTP_400_BAD_REQUEST)
+    if periods < 1 or periods > 24:
+        return Response({"error": "'periods' debe estar entre 1 y 24"}, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        df = read_dataset_dataframe(dataset)
+    except Exception as e:
+        return Response({"error": f"No se pudo leer el dataset: {e}"}, status=status.HTTP_400_BAD_REQUEST)
+
+    if target_col not in df.columns:
+        return Response({"error": f"'{target_col}' no existe en este dataset"}, status=status.HTTP_400_BAD_REQUEST)
+
+    result = what_if_simulation(df, target_col, scenarios, periods=periods)
+    if "error" in result:
+        return Response(result, status=status.HTTP_400_BAD_REQUEST)
+    return Response(result)
+
+
+# ---------------------------------------------------------------------------
+# Recomendaciones proactivas (Módulo 6)
+# ---------------------------------------------------------------------------
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def recommendation_list(request):
+    workspace, _ = Workspace.objects.get_or_create(owner=request.user)
+    recs = Recommendation.objects.filter(workspace=workspace)
+    if request.query_params.get('dismissed') != 'true':
+        recs = recs.filter(dismissed=False)
+    dataset_id = request.query_params.get('dataset_id')
+    if dataset_id:
+        recs = recs.filter(dataset_id=dataset_id)
+    return Response(RecommendationSerializer(recs, many=True).data)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def recommendation_dismiss(request, pk):
+    workspace, _ = Workspace.objects.get_or_create(owner=request.user)
+    rec = Recommendation.objects.filter(pk=pk, workspace=workspace).first()
+    if not rec:
+        return Response({"error": "No encontrado"}, status=status.HTTP_404_NOT_FOUND)
+    rec.dismissed = True
+    rec.save(update_fields=['dismissed'])
+    return Response(RecommendationSerializer(rec).data)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def dataset_generate_recommendations(request, pk):
+    """Regenera recomendaciones a demanda (normalmente ya corre solo al
+    terminar el análisis async; este endpoint es para forzarlo a mano, o
+    para cuando el dataset se analizó antes de que este módulo existiera)."""
+    workspace, _ = Workspace.objects.get_or_create(owner=request.user)
+    dataset = Dataset.objects.filter(pk=pk, workspace=workspace).first()
+    if not dataset:
+        return Response({"error": "Dataset no encontrado"}, status=status.HTTP_404_NOT_FOUND)
+    if not dataset.analysis_context:
+        return Response({"error": "Este dataset todavía no tiene un análisis para generar recomendaciones"}, status=status.HTTP_400_BAD_REQUEST)
+
+    from . import recommendations as recommendations_module
+    created = recommendations_module.generate_recommendations_for_dataset(dataset)
+    return Response(RecommendationSerializer(created, many=True).data, status=status.HTTP_201_CREATED)

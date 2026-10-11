@@ -7,7 +7,7 @@ from .utils import detect_file_type
 from .scoring import evaluate_business
 from .trends import analyze_numeric_trends
 from .anomalies import detect_anomalies, check_fraud_signals
-from .forecasting import simple_forecast
+from .forecasting import simple_forecast, what_if_simulation
 from .cleaning import clean_dataframe, detect_headers, detect_language
 
 

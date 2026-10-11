@@ -14,6 +14,14 @@ class AgentProfile:
     triggers: tuple[str, ...]
     requires_dataset: bool = False
     priority: int = 50
+    # Módulo 6 — a qué área de negocio pertenece este agente. La
+    # especificación original pedía "agentes especializados por área
+    # (finanzas, ventas, marketing)"; antes los 7 agentes existían pero
+    # estaban organizados solo por *tipo de análisis* (riesgo, insight,
+    # forecast...), sin ninguna noción de área de negocio. Este campo no
+    # reemplaza esa organización — la complementa, para poder filtrar/agrupar
+    # por área sin tocar el enrutamiento por intención que ya funciona.
+    business_area: str = "general"
 
 
 AGENT_REGISTRY = {
@@ -25,6 +33,7 @@ AGENT_REGISTRY = {
         triggers=("antes", "anterior", "dijiste", "hablamos", "recuerda", "contexto", "referias", "archivo antiguo", "otro chat", "pasado"),
         requires_dataset=False,
         priority=100,
+        business_area="general",
     ),
     "risk": AgentProfile(
         key="risk",
@@ -34,6 +43,7 @@ AGENT_REGISTRY = {
         triggers=("riesgo", "anomalia", "anomal", "error", "inconsistencia", "alerta", "problema"),
         requires_dataset=False,
         priority=92,
+        business_area="finanzas",
     ),
     "insight": AgentProfile(
         key="insight",
@@ -43,6 +53,7 @@ AGENT_REGISTRY = {
         triggers=("patron", "insight", "hallazgo", "oportunidad", "comportamiento", "tendencia"),
         requires_dataset=False,
         priority=90,
+        business_area="ventas",
     ),
     "recommendation": AgentProfile(
         key="recommendation",
@@ -52,6 +63,7 @@ AGENT_REGISTRY = {
         triggers=("recomienda", "acción", "mejora", "optimiza", "solución", "qué hago", "siguiente paso", "estrategia"),
         requires_dataset=False,
         priority=88,
+        business_area="marketing",
     ),
     "executive": AgentProfile(
         key="executive",
@@ -61,6 +73,7 @@ AGENT_REGISTRY = {
         triggers=("ejecutivo", "negocio", "prioriza", "dirección", "impacto", "ceo", "gerencia", "visión"),
         requires_dataset=False,
         priority=84,
+        business_area="general",
     ),
     "operations": AgentProfile(
         key="operations",
@@ -70,6 +83,7 @@ AGENT_REGISTRY = {
         triggers=("operacion", "proceso", "eficiencia", "flujo", "cuello", "productivity"),
         requires_dataset=False,
         priority=78,
+        business_area="operaciones",
     ),
     "forecast": AgentProfile(
         key="forecast",
@@ -79,8 +93,11 @@ AGENT_REGISTRY = {
         triggers=("proyeccion", "forecast", "escenario", "futuro", "crec", "caer", "tendencia"),
         requires_dataset=True,
         priority=76,
+        business_area="finanzas",
     ),
 }
+
+BUSINESS_AREAS = ["finanzas", "ventas", "marketing", "operaciones", "general"]
 
 
 def get_agent_options() -> str:
@@ -93,6 +110,14 @@ def get_agent_options() -> str:
         options.append(f"- {agent.key}: {agent.name}. Enfoque: {agent.focus}")
     options.append("- chat: Conversación general o preguntas que no requieren un especialista.")
     return "\n".join(options)
+
+
+def get_agents_by_business_area() -> Dict[str, List[AgentProfile]]:
+    """Agrupa el registro de agentes por área de negocio (Módulo 6)."""
+    grouped: Dict[str, List[AgentProfile]] = {area: [] for area in BUSINESS_AREAS}
+    for agent in sorted(AGENT_REGISTRY.values(), key=lambda a: -a.priority):
+        grouped.setdefault(agent.business_area, []).append(agent)
+    return grouped
 
 
 def run_specialist_agent(agent: AgentProfile, question: str, context: str, history: str, industry: str, llm_callback) -> str:
