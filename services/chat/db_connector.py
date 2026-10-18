@@ -14,7 +14,9 @@ versión apurada):
   (Postgres), con un timeout corto, y se cierra siempre en el `finally`.
 - Los resultados se limitan a un máximo de filas para no agotar memoria.
 """
+import ipaddress
 import re
+import socket
 from typing import Tuple
 
 MAX_ROWS = 50_000
@@ -46,6 +48,36 @@ def validate_select_only(query: str) -> str:
     return q.rstrip(";")
 
 
+# FIXED: 2026-10-12 SSRF — `dataset_import_db` dejaba a cualquier usuario
+# autenticado (sin restriccion adicional de rol/organizacion) decirle al
+# servidor a qué `host`/`port` conectarse. Aunque la consulta en si estaba
+# bien validada (solo SELECT), no habia ninguna validacion sobre el DESTINO
+# de la conexion: un usuario podia apuntar a 'localhost', a la IP de
+# metadata de la nube (169.254.169.254) o a cualquier host interno de la
+# VPC y usar el propio backend de Nura como proxy de red (SSRF) para
+# sondear o leer servicios que no deberian ser alcanzables desde fuera.
+# Esta funcion resuelve el host y rechaza loopback/link-local/privado/
+# reservado antes de intentar conectar.
+def _assert_host_is_public(host: str) -> None:
+    hostname = (host or "").strip().strip("[]")
+    if not hostname:
+        raise UnsafeQueryError("Host inválido.")
+    if hostname.lower() in ("localhost", "0.0.0.0", "::1", "metadata.google.internal"):
+        raise UnsafeQueryError("No se permite conectar a hosts internos/locales.")
+    try:
+        resolved = {info[4][0] for info in socket.getaddrinfo(hostname, None)}
+    except socket.gaierror:
+        raise UnsafeQueryError(f"No se pudo resolver el host '{hostname}'.")
+    for addr in resolved:
+        ip = ipaddress.ip_address(addr)
+        if (ip.is_loopback or ip.is_private or ip.is_link_local
+                or ip.is_reserved or ip.is_multicast or ip.is_unspecified):
+            raise UnsafeQueryError(
+                "No se permite conectar a direcciones IP privadas, de loopback "
+                "o reservadas (riesgo de SSRF)."
+            )
+
+
 def build_safe_connection_url(dialect: str, host: str, port: str, database: str, username: str, password: str) -> str:
     from urllib.parse import quote_plus
 
@@ -58,6 +90,8 @@ def build_safe_connection_url(dialect: str, host: str, port: str, database: str,
     driver = drivers.get(dialect)
     if not driver:
         raise UnsafeQueryError(f"Motor de base de datos no soportado: '{dialect}'. Usa 'postgresql' o 'mysql'.")
+
+    _assert_host_is_public(host)
 
     user = quote_plus(username or "")
     pwd = quote_plus(password or "")

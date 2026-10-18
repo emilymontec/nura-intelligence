@@ -118,14 +118,29 @@ MIDDLEWARE = [
 ]
 
 
-CORS_ALLOW_ALL_ORIGINS = True
+# FIXED: 2026-10-12 CORS_ALLOW_ALL_ORIGINS=True combinado con
+# CORS_ALLOW_CREDENTIALS=True hacía que CUALQUIER sitio web pudiera hacerle
+# peticiones autenticadas (con cookies de sesión) al backend de Nura desde
+# el navegador de un usuario logueado — el patrón clásico que
+# django-cors-headers advierte explícitamente como inseguro. Mismo patrón
+# de fallback que el resto del archivo: si se define DJANGO_CORS_ALLOWED_ORIGINS
+# (lista separada por comas) se usa esa lista explícita; si no, se cae a los
+# orígenes de desarrollo local de siempre, nunca a "*".
+_cors_env = os.getenv('DJANGO_CORS_ALLOWED_ORIGINS')
+if _cors_env:
+    CORS_ALLOWED_ORIGINS = [o.strip() for o in _cors_env.split(',') if o.strip()]
+else:
+    CORS_ALLOWED_ORIGINS = [
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ]
 CORS_ALLOW_CREDENTIALS = True
 CSRF_TRUSTED_ORIGINS = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
     "http://localhost:8000",
     "http://127.0.0.1:8000",
-]
+] + CORS_ALLOWED_ORIGINS
 ROOT_URLCONF = 'nura.urls'
 
 

@@ -129,3 +129,55 @@ class CachingAndApiDocsTests(AuthenticatedTestCase):
 
         res = self.client.get("/datasets/stats/", **self.auth)
         self.assertEqual(res.json()["total"], 0, "El caché no se invalidó al borrar el dataset")
+
+
+class ForecastEdgeCaseTests(AuthenticatedTestCase):
+    """
+    Tests críticos faltantes (auditoría 2026-10-12): la especificación de
+    `simple_forecast`/`what_if_simulation` (services/analytics/forecasting.py)
+    debe degradarse con gracia ante datos límite — negativos, en cero, o
+    insuficientes — en vez de devolver un 500 o un resultado sin sentido.
+    """
+
+    def test_negative_and_zero_values_do_not_crash_forecast(self):
+        # last_val puede caer exactamente en 0 (división por cero evitada
+        # explícitamente en simple_forecast) y la serie puede ser
+        # decreciente/negativa (p. ej. pérdidas).
+        lines = ["dia,balance"]
+        values = [10, 5, 0, -5, -10, 0, -3]
+        for i, v in enumerate(values):
+            lines.append(f"{i},{v}")
+        res = self.client.post("/datasets", {"file": csv_file("\n".join(lines), "balance.csv")}, **self.auth)
+        dataset_id = res.json()["id"]
+
+        res = self.client.post(
+            f"/datasets/{dataset_id}/what-if/",
+            data=json.dumps({"target_col": "balance", "periods": 2,
+                              "scenarios": [{"name": "Base", "growth_adjustment_pct": 0}]}),
+            content_type="application/json",
+            **self.auth,
+        )
+        self.assertEqual(res.status_code, 200, res.content)
+        baseline = res.json()["baseline"]
+        # simple_forecast nunca debe reventar por división por cero, y las
+        # proyecciones no deben ser NaN/inf.
+        self.assertTrue(all(p == p and abs(p) != float("inf") for p in baseline["projections"]))
+
+    def test_insufficient_numeric_history_is_rejected_cleanly(self):
+        # Menos de 3 valores numéricos: simple_forecast debe devolver {} y
+        # el endpoint debe traducirlo en un 400 claro, no en un 500.
+        res = self.client.post(
+            "/datasets",
+            {"file": csv_file("dia,ventas\n0,10\n1,20\n", "pocas_filas.csv")},
+            **self.auth,
+        )
+        dataset_id = res.json()["id"]
+        res = self.client.post(
+            f"/datasets/{dataset_id}/what-if/",
+            data=json.dumps({"target_col": "ventas", "periods": 1,
+                              "scenarios": [{"name": "Base", "growth_adjustment_pct": 0}]}),
+            content_type="application/json",
+            **self.auth,
+        )
+        self.assertEqual(res.status_code, 400, res.content)
+        self.assertIn("error", res.json())
