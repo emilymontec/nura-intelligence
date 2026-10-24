@@ -48,6 +48,14 @@ It ships with a working example built around three e-commerce marketplaces — T
 | **Automation & triggers** | New file, detected anomaly or scheduled date — automatically analyze, notify or generate a report. |
 | **Collaboration** | Organizations, roles, sharing and comments on top of a multiuser workspace model. |
 | **Enterprise AI** | Specialized agents per business area (finance, sales, marketing, operations), "what-if" simulations and proactive recommendations. |
+| **Conversational analytics** | Chat with your dataset — ask for trends, comparisons, breakdowns — with full context of the active dataset and conversation history. |
+| **Automatic data engine** | Format detection, null handling, type inference, deduplication. Raw files become clean, versioned internal datasets. |
+| **Proactive insights** | Correlations, distributions, anomaly detection (Isolation Forest) and auto-computed KPIs — surfaced without being asked. |
+| **Visualizations & dashboards** | Bar, line, pie, heatmap and scatter charts, exportable to PNG/SVG/PDF. Build dashboards manually or let the AI generate them. |
+| **Automated reports** | Executive, technical and financial reports, exportable to PDF/DOCX/PPTX. |
+| **Automation & triggers** | New file, detected anomaly or scheduled date — automatically analyze, notify or generate a report. |
+| **Collaboration** | Organizations, roles, sharing and comments on top of a multiuser workspace model. |
+| **Enterprise AI** | Specialized agents per business area (finance, sales, marketing, operations), "what-if" simulations and proactive recommendations. |
 
 ---
 
@@ -58,7 +66,9 @@ It ships with a working example built around three e-commerce marketplaces — T
 <td width="50%" valign="top">
 
 <h3>I want to analyze my data</h3>
+<h3>I want to analyze my data</h3>
 
+<p align="justify">Upload a CSV/XLSX/JSON file, let the data engine clean and profile it, then just ask questions in natural language.</p>
 <p align="justify">Upload a CSV/XLSX/JSON file, let the data engine clean and profile it, then just ask questions in natural language.</p>
 
 **[→ Jump to Quickstart](#quickstart)**
@@ -67,7 +77,9 @@ It ships with a working example built around three e-commerce marketplaces — T
 <td width="50%" valign="top">
 
 <h3>I'm extending the platform</h3>
+<h3>I'm extending the platform</h3>
 
+<p align="justify">Each module is an independent Django app/service under <code>services/</code>, with its own models, tests and, where it applies, Celery tasks.</p>
 <p align="justify">Each module is an independent Django app/service under <code>services/</code>, with its own models, tests and, where it applies, Celery tasks.</p>
 
 **[→ Jump to Architecture](#architecture)**
@@ -78,9 +90,12 @@ It ships with a working example built around three e-commerce marketplaces — T
 <td colspan="2" valign="top">
 
 <h3>I want to deploy it</h3>
+<h3>I want to deploy it</h3>
 
 <p align="justify">Docker Compose setup with Postgres, Redis, a Celery worker and an Nginx-served frontend. See the Quickstart section below for the commands, and Architecture for how the pieces fit together.</p>
+<p align="justify">Docker Compose setup with Postgres, Redis, a Celery worker and an Nginx-served frontend. See the Quickstart section below for the commands, and Architecture for how the pieces fit together.</p>
 
+**[→ Jump to Quickstart](#quickstart)**
 **[→ Jump to Quickstart](#quickstart)**
 
 </td>
@@ -103,6 +118,7 @@ python manage.py runserver
 ```
 
 <p align="justify">If <code>DATABASE_URL</code> is not set in <code>.env</code>, the project falls back to SQLite automatically — no local Postgres required to try it out.</p>
+<p align="justify">If <code>DATABASE_URL</code> is not set in <code>.env</code>, the project falls back to SQLite automatically — no local Postgres required to try it out.</p>
 
 ### 2. Frontend (React + Vite), in another terminal
 
@@ -116,11 +132,14 @@ pnpm dev
 ### 3. Open the app
 
 <p align="justify"><strong>http://localhost:5173</strong> is the user interface.</p>
+<p align="justify"><strong>http://localhost:5173</strong> is the user interface.</p>
 
+<p align="justify"><code>http://localhost:8000</code> is only the backend API (you will see a status page, not the app).</p>
 <p align="justify"><code>http://localhost:8000</code> is only the backend API (you will see a status page, not the app).</p>
 
 ### AI chat
 
+<p align="justify">The conversational engine needs at least one LLM provider key in <code>.env</code> (<code>GROQ_API_KEY</code>, <code>CEREBRAS_API_KEY</code> or <code>OPENROUTER_API_KEY</code>). Without one, the rest of the platform (auth, dataset upload, etc.) still works, but the chat will return an error.</p>
 <p align="justify">The conversational engine needs at least one LLM provider key in <code>.env</code> (<code>GROQ_API_KEY</code>, <code>CEREBRAS_API_KEY</code> or <code>OPENROUTER_API_KEY</code>). Without one, the rest of the platform (auth, dataset upload, etc.) still works, but the chat will return an error.</p>
 
 ### Try it with sample data
@@ -130,6 +149,7 @@ python scripts/generar_dataset_ejemplo.py
 ```
 
 <p align="justify">Generates a realistic 200-row e-commerce dataset (Temu/Shein/AliExpress orders), deliberately imperfect — nulls, a couple of price outliers and a duplicate row — so there is something real for the analytics engine to detect end to end.</p>
+<p align="justify">Generates a realistic 200-row e-commerce dataset (Temu/Shein/AliExpress orders), deliberately imperfect — nulls, a couple of price outliers and a duplicate row — so there is something real for the analytics engine to detect end to end.</p>
 
 ### Run with Docker
 
@@ -138,6 +158,7 @@ cd docker
 docker compose up --build
 ```
 
+<p align="justify">This spins up Postgres, Redis, the Django service, a Celery worker, an Nginx gateway and the frontend dev server, each with health checks.</p>
 <p align="justify">This spins up Postgres, Redis, the Django service, a Celery worker, an Nginx gateway and the frontend dev server, each with health checks.</p>
 
 ---
@@ -151,8 +172,11 @@ docker compose up --build
 |---|--------|---------------|
 | 1 | **Accounts & Workspace** | Full auth (register, login, password recovery, profile), an auto-provisioned workspace per user, and file upload/management (CSV, XLSX, JSON) with validation and metadata. |
 | 2 | **Data Engine** | Automatic reading and cleaning (format detection, nulls, types, duplicates), file-to-internal-dataset conversion, and dataset CRUD: versioning, merging, exploration, basic statistics. |
+| 2 | **Data Engine** | Automatic reading and cleaning (format detection, nulls, types, duplicates), file-to-internal-dataset conversion, and dataset CRUD: versioning, merging, exploration, basic statistics. |
 | 3 | **Conversational AI + Analytics** | Chat with context of the active dataset and conversation history; analytical engine for correlations, distributions, anomalies and automatic KPIs. The AI also surfaces findings proactively. |
 | 4 | **Visualization & Reports** | Charts (bar, line, pie, heatmap, scatter) exportable to PNG/SVG/PDF; buildable dashboards (manual or AI-generated); automated executive/technical/financial reports exportable to PDF/DOCX/PPTX. |
+| 5 | **Automation & Collaboration** | Triggers (new file, anomaly, date) that fire actions (analyze, notify, generate report); multiuser model with organizations, roles, sharing and comments; external data-source integration via read-only queries against external databases. |
+| 6 | **Enterprise AI** | Specialized agents per business area (finance, sales, marketing, operations), "what-if" simulations, proactive recommendations, two-factor authentication (TOTP), and a documented public REST API. |
 | 5 | **Automation & Collaboration** | Triggers (new file, anomaly, date) that fire actions (analyze, notify, generate report); multiuser model with organizations, roles, sharing and comments; external data-source integration via read-only queries against external databases. |
 | 6 | **Enterprise AI** | Specialized agents per business area (finance, sales, marketing, operations), "what-if" simulations, proactive recommendations, two-factor authentication (TOTP), and a documented public REST API. |
 
@@ -162,10 +186,17 @@ docker compose up --build
 
 ```
 nura/
+nura/
 ├── docker/          # docker-compose, Nginx config, Dockerfiles
 ├── frontend/        # React + Vite + TypeScript + Tailwind SPA
 ├── nura/            # Django project config (settings, urls, celery app)
+├── frontend/        # React + Vite + TypeScript + Tailwind SPA
+├── nura/            # Django project config (settings, urls, celery app)
 ├── services/
+│   ├── chat/        # Modules 1, 3 (chat), 4, 5, 6 — Django app: models, views, tasks
+│   ├── ai/          # LLM integration, agents, prompts
+│   └── analytics/   # Module 2, 3 (analytics) — cleaning, anomalies, trends, scoring
+└── scripts/         # utility & sample-data scripts
 │   ├── chat/        # Modules 1, 3 (chat), 4, 5, 6 — Django app: models, views, tasks
 │   ├── ai/          # LLM integration, agents, prompts
 │   └── analytics/   # Module 2, 3 (analytics) — cleaning, anomalies, trends, scoring
@@ -192,7 +223,11 @@ nura/
 ## API reference
 
 <p align="justify">With the backend running, interactive API documentation is available at:</p>
+<p align="justify">With the backend running, interactive API documentation is available at:</p>
 
+- `http://localhost:8000/api/docs/` — Swagger UI
+- `http://localhost:8000/api/redoc/` — Redoc
+- `http://localhost:8000/healthz/` — health check (database + cache)
 - `http://localhost:8000/api/docs/` — Swagger UI
 - `http://localhost:8000/api/redoc/` — Redoc
 - `http://localhost:8000/healthz/` — health check (database + cache)
@@ -211,11 +246,17 @@ python manage.py test chat --verbosity=2
 <p align="justify">
 Every push and pull request against <code>main</code> runs the full backend suite against real Postgres and Redis services, checks the health endpoint, and builds the frontend. See <a href=".github/workflows/ci.yml"><code>.github/workflows/ci.yml</code></a>.
 </p>
+<p align="justify">
+Every push and pull request against <code>main</code> runs the full backend suite against real Postgres and Redis services, checks the health endpoint, and builds the frontend. See <a href=".github/workflows/ci.yml"><code>.github/workflows/ci.yml</code></a>.
+</p>
 
 ---
 
 ## Author
+## Author
 
+**Emily Monterrosa Castro - Full Stack Developer** <br>
+[GitHub](https://github.com/emilymontec) · [LinkedIn](https://www.linkedin.com/in/emilymontec/) · [Portfolio](https://emilymontec.github.io/portfolio/)
 **Emily Monterrosa Castro - Full Stack Developer** <br>
 [GitHub](https://github.com/emilymontec) · [LinkedIn](https://www.linkedin.com/in/emilymontec/) · [Portfolio](https://emilymontec.github.io/portfolio/)
 
