@@ -108,6 +108,8 @@ It ships with a working example built around three e-commerce marketplaces — T
 
 ### 1. Backend (Django)
 
+> Requires **Python 3.12 or newer** — `requirements.txt` pins Django 6.x, which does not install on Python 3.11 or older.
+
 ```bash
 cp .env.example .env
 python -m venv venv && source venv/bin/activate     # Windows: venv\Scripts\activate

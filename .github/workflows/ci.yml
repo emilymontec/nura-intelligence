@@ -58,8 +58,8 @@ jobs:
           cache: "pip"
 
       - name: Instalar dependencias
-        # requirements.txt está en UTF-16LE (heredado del proyecto original);
-        # pip lo lee sin problema, no hace falta convertirlo.
+        # requirements.txt está en UTF-8 y fija Django 6.x, que exige
+        # Python >= 3.12 (por eso el job usa 3.13).
         run: pip install -r requirements.txt
 
       - name: Aplicar migraciones

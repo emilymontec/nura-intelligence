@@ -1,15 +1,24 @@
-FROM python:3.11-slim
+# Django 6.x exige Python >= 3.12 (ver Requires-Python del pin Django==6.0.5).
+# Con python:3.11-slim "pip install -r requirements.txt" fallaba siempre con
+# "No matching distribution found for Django==6.0.5". La CI ya usa 3.13, se
+# alinea la imagen a la misma version.
+FROM python:3.13-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
 
 WORKDIR /app
 
+# libgomp1 es dependencia de runtime de scikit-learn (OpenMP) y no viene en
+# slim. gcc/libpq-dev ya no se necesitan: psycopg2-binary trae wheels
+# precompiladas con libpq incluida.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
 # Actualizar pip
 RUN pip install --upgrade pip
-
-# Instalar dependencias del sistema
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc \
-    libpq-dev \
-    && rm -rf /var/lib/apt/lists/*
 
 # Instalar dependencias de Python
 COPY requirements.txt .
