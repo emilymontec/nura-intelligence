@@ -75,7 +75,7 @@ const chartOptions = {
 
 export default function DashboardBuilder() {
   const { refreshAccessToken } = useAuth();
-  const getHeaders = useCallback(getAuthHeaders(refreshAccessToken), [refreshAccessToken]);
+  const getHeaders = useCallback(() => getAuthHeaders(refreshAccessToken), [refreshAccessToken]);
 
   const [dashboards, setDashboards] = useState([]);
   const [activeId, setActiveId] = useState(null);

@@ -9,6 +9,8 @@ const BACKEND_PATHS = [
   '/admin', '/accounts', '/auth', '/static',
   '/chat', '/analyze', '/test', '/sessions',
   '/profile', '/workspace', '/datasets', '/tags', '/categories',
+  '/dashboards', '/triggers', '/shares', '/comments', '/agents',
+  '/recommendations', '/organizations', '/healthz',
 ];
 
 export default defineConfig(({ command }) => {

@@ -128,7 +128,7 @@ python manage.py runserver
 cd frontend
 cp .env.example .env
 pnpm install
-pnpm dev
+pnpm vite
 ```
 
 ### 3. Open the app
@@ -266,7 +266,7 @@ Every push and pull request against <code>main</code> runs the full backend suit
 
 ## License
 
-Apache License 2.0
+MIT License
 
 See the [LICENSE](LICENSE) file for additional information.
 
